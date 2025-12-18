@@ -14,7 +14,7 @@ Your compiler must generate **pure Z80 mnemonics**:
 - ADD, SUB, AND, OR, XOR (not ANA, ORA, XRA, etc.)
 - PUSH, POP with Z80 register names (AF not PSW, BC/DE/HL not B/D/H)
 
-If your compiler generates 8080 mnemonics, use [upeep80](https://github.com/yourusername/upeep80) instead.
+If your compiler generates 8080 mnemonics, use [upeep80](https://github.com/avwohl/upeep80) instead.
 
 ## Basic Usage
 
@@ -203,4 +203,4 @@ If you're migrating from upeep80:
 ## See Also
 
 - [README.md](../README.md) - Overview and features
-- [upeep80](https://github.com/yourusername/upeep80) - For 8080 input support
+- [upeep80](https://github.com/avwohl/upeep80) - For 8080 input support

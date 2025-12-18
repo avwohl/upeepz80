@@ -6,7 +6,7 @@ A language-agnostic peephole optimization library for Z80 compilers that generat
 
 upeepz80 provides high-quality optimization passes for compilers targeting the Zilog Z80 processor. Unlike upeep80, this library expects **pure Z80 mnemonics** as input (LD, JP, JR, etc.) and produces optimized Z80 assembly output.
 
-If your compiler generates 8080 mnemonics (MOV, MVI, LXI, etc.) that need translation to Z80, use [upeep80](https://github.com/yourusername/upeep80) instead.
+If your compiler generates 8080 mnemonics (MOV, MVI, LXI, etc.) that need translation to Z80, use [upeep80](https://github.com/avwohl/upeep80) instead.
 
 ## Features
 
@@ -35,7 +35,7 @@ pip install upeepz80
 Or for development:
 
 ```bash
-git clone https://github.com/yourusername/upeepz80.git
+git clone https://github.com/avwohl/upeepz80.git
 cd upeepz80
 pip install -e ".[dev]"
 ```
@@ -117,8 +117,8 @@ Choose **upeep80** if your compiler generates 8080 mnemonics.
 
 ## Used By
 
-- **[uplm80](https://github.com/yourusername/uplm80)** - PL/M-80 compiler for Z80 (after migration)
-- **[uada80](https://github.com/yourusername/uada80)** - Ada compiler for Z80 (after migration)
+- **[uplm80](https://github.com/avwohl/uplm80)** - PL/M-80 compiler for Z80 (after migration)
+- **[uada80](https://github.com/avwohl/uada80)** - Ada compiler for Z80 (after migration)
 
 ## Development
 
@@ -162,5 +162,5 @@ upeepz80 is a sibling project to upeep80, designed for compilers that generate n
 
 ## See Also
 
-- [upeep80](https://github.com/yourusername/upeep80) - Optimizer with 8080 input support
+- [upeep80](https://github.com/avwohl/upeep80) - Optimizer with 8080 input support
 - [Z80 CPU User Manual](http://www.z80.info/zip/z80cpu_um.pdf)
