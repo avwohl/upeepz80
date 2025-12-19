@@ -364,9 +364,11 @@ class TestPreservation:
         assert "; this is a comment" in result
 
     def test_directives_preserved(self):
-        """Directives should be preserved."""
-        result = optimize("    org 100h\n    ret")
-        assert "org" in result.lower() or "100h" in result.lower()
+        """Directives should be passed through unchanged."""
+        result = optimize("    db 0\n    dw 1234h\n    ret")
+        assert "db 0" in result
+        assert "dw 1234h" in result
+        assert "ret" in result
 
 
 class TestComplexSequences:
