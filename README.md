@@ -4,7 +4,7 @@ A language-agnostic peephole optimization library for Z80 compilers that generat
 
 ## Overview
 
-upeepz80 provides high-quality optimization passes for compilers targeting the Zilog Z80 processor. Unlike upeep80, this library expects **pure Z80 mnemonics** as input (LD, JP, JR, etc.) and produces optimized Z80 assembly output.
+upeepz80 provides high-quality optimization passes for compilers targeting the Zilog Z80 processor. Unlike upeep80, this library expects **pure Z80 mnemonics in lowercase** as input (ld, jp, jr, etc.) and produces optimized Z80 assembly output with lowercase mnemonics.
 
 If your compiler generates 8080 mnemonics (MOV, MVI, LXI, etc.) that need translation to Z80, use [upeep80](https://github.com/avwohl/upeep80) instead.
 
@@ -13,18 +13,18 @@ If your compiler generates 8080 mnemonics (MOV, MVI, LXI, etc.) that need transl
 ### Peephole Optimizations
 - **Pattern-based optimization** on Z80 assembly
 - **Redundant load/store elimination**
-- **Jump optimization** (JP to JR conversion, jump threading)
-- **DJNZ conversion** (DEC B; JR NZ → DJNZ)
-- **Stack operation combining** (PUSH/POP to LD conversions)
+- **Jump optimization** (jp to jr conversion, jump threading)
+- **djnz conversion** (dec b; jr nz → djnz)
+- **Stack operation combining** (push/pop to ld conversions)
 - **Dead store elimination**
-- **Tail call optimization** (CALL x; RET → JP x)
-- **Register copy optimization** (PUSH HL; POP DE → LD D,H; LD E,L)
+- **Tail call optimization** (call x; ret → jp x)
+- **Register copy optimization** (push hl; pop de → ld d,h; ld e,l)
 
 ### Z80-Specific Features
-- Relative jump optimization (JP → JR where in range)
-- DJNZ loop optimization
+- Relative jump optimization (jp → jr where in range)
+- djnz loop optimization
 - Z80 block instruction awareness
-- Direct LD DE,(addr) usage (Z80-only instruction)
+- Direct ld de,(addr) usage (Z80-only instruction)
 
 ## Installation
 
@@ -49,21 +49,21 @@ from upeepz80 import optimize
 
 # Optimize Z80 assembly code
 assembly = """
-    LD A,0
-    PUSH HL
-    POP DE
-    JP LABEL
+    ld a,0
+    push hl
+    pop de
+    jp LABEL
 LABEL:
-    RET
+    ret
 """
 
 optimized = optimize(assembly)
 print(optimized)
 # Output:
-#     XOR A          ; LD A,0 → XOR A (smaller)
-#     LD D,H         ; PUSH/POP → register moves (faster)
-#     LD E,L
-#     RET            ; JP to next instruction eliminated
+#     xor a          ; ld a,0 → xor a (smaller)
+#     ld d,h         ; push/pop → register moves (faster)
+#     ld e,l
+#     ret            ; jp to next instruction eliminated
 ```
 
 ### Using the Optimizer Class
@@ -78,9 +78,9 @@ optimizer = PeepholeOptimizer()
 optimized_asm = optimizer.optimize(assembly_text)
 
 # Check statistics
-print(f"XOR A conversions: {optimizer.stats.get('xor_a', 0)}")
+print(f"xor a conversions: {optimizer.stats.get('xor_a', 0)}")
 print(f"Jump threading: {optimizer.stats.get('jump_thread', 0)}")
-print(f"DJNZ conversions: {optimizer.stats.get('djnz', 0)}")
+print(f"djnz conversions: {optimizer.stats.get('djnz', 0)}")
 ```
 
 ## Optimization Phases
@@ -90,8 +90,8 @@ The optimizer runs multiple phases:
 1. **Pattern Matching** - Apply peephole patterns (up to 10 passes)
 2. **Z80-Specific Optimizations** - Inline patterns for Z80 instructions
 3. **Jump Threading** - Thread through intermediate jumps
-4. **Relative Jump Conversion** - Convert JP to JR where possible
-5. **DJNZ Optimization** - Convert DEC B; JR NZ to DJNZ
+4. **Relative Jump Conversion** - Convert jp to jr where possible
+5. **djnz Optimization** - Convert dec b; jr nz to djnz
 6. **Dead Store Elimination** - Remove unused stores
 
 ## Architecture

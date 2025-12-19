@@ -6,13 +6,13 @@ upeepz80 provides a language-agnostic peephole optimizer for Z80 assembly. It wo
 
 ## Prerequisites
 
-Your compiler must generate **pure Z80 mnemonics**:
-- LD (not MOV, MVI, LDA, STA, etc.)
-- JP, JR (not JMP, JZ, JNZ, etc.)
-- CP (not CMP, CPI)
-- INC, DEC (not INR, DCR, INX, DCX)
-- ADD, SUB, AND, OR, XOR (not ANA, ORA, XRA, etc.)
-- PUSH, POP with Z80 register names (AF not PSW, BC/DE/HL not B/D/H)
+Your compiler must generate **pure Z80 mnemonics in lowercase**:
+- ld (not MOV, MVI, LDA, STA, etc.)
+- jp, jr (not JMP, JZ, JNZ, etc.)
+- cp (not CMP, CPI)
+- inc, dec (not INR, DCR, INX, DCX)
+- add, sub, and, or, xor (not ANA, ORA, XRA, etc.)
+- push, pop with Z80 register names (af not PSW, bc/de/hl not B/D/H)
 
 If your compiler generates 8080 mnemonics, use [upeep80](https://github.com/avwohl/upeep80) instead.
 
@@ -56,11 +56,11 @@ The optimizer tracks various statistics:
 
 ```python
 # After optimization
-print(f"XOR A conversions: {optimizer.stats.get('xor_a', 0)}")
+print(f"xor a conversions: {optimizer.stats.get('xor_a', 0)}")
 print(f"Jump threading: {optimizer.stats.get('jump_thread', 0)}")
-print(f"DJNZ conversions: {optimizer.stats.get('djnz', 0)}")
-print(f"JP to JR: {optimizer.stats.get('jr_convert', 0)}")
-print(f"Push/Pop to LD: {optimizer.stats.get('push_pop_copy_hl_de', 0)}")
+print(f"djnz conversions: {optimizer.stats.get('djnz', 0)}")
+print(f"jp to jr: {optimizer.stats.get('jr_convert', 0)}")
+print(f"push/pop to ld: {optimizer.stats.get('push_pop_copy_hl_de', 0)}")
 print(f"Dead stores removed: {optimizer.stats.get('dead_store_elim', 0)}")
 ```
 
@@ -78,12 +78,12 @@ optimizer = PeepholeOptimizer()
 custom_pattern = PeepholePattern(
     name="my_custom_pattern",
     pattern=[
-        ("LD", "A,0"),
-        ("LD", "B,A"),
+        ("ld", "a,0"),
+        ("ld", "b,a"),
     ],
     replacement=[
-        ("XOR", "A"),
-        ("LD", "B,A"),
+        ("xor", "a"),
+        ("ld", "b,a"),
     ]
 )
 
@@ -131,28 +131,28 @@ class MyCompiler:
 
 ## Expected Input Format
 
-The optimizer expects standard Z80 assembly format:
+The optimizer expects standard Z80 assembly format with lowercase mnemonics:
 
 ```asm
 ; Comments start with semicolon
 LABEL:
-    LD A,0        ; Load instruction
-    CP B          ; Compare
-    JP Z,DONE     ; Conditional jump
-    CALL FUNC     ; Call subroutine
-    RET           ; Return
+    ld a,0        ; Load instruction
+    cp b          ; Compare
+    jp z,DONE     ; Conditional jump
+    call FUNC     ; Call subroutine
+    ret           ; Return
 DONE:
-    LD HL,1234H   ; 16-bit load
-    RET
+    ld hl,1234h   ; 16-bit load
+    ret
 ```
 
 ### Supported Features
 
 - Labels (with colon)
-- Standard Z80 mnemonics
-- Hex numbers (0FFH format)
+- Standard Z80 mnemonics (lowercase)
+- Hex numbers (0ffh format)
 - Comments (semicolon)
-- Directives (ORG, DB, DW, DS, EQU) are preserved
+- Directives (org, db, dw, ds, equ) are preserved
 
 ### Indentation
 

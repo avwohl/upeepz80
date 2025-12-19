@@ -4,8 +4,9 @@ Peephole Optimizer for Z80.
 Performs pattern-based optimizations on generated Z80 assembly code.
 This runs after code generation to clean up inefficient sequences.
 
-This module expects pure Z80 mnemonics as input (LD, JP, JR, etc.)
-and produces optimized Z80 assembly as output.
+This module expects pure Z80 mnemonics as input (ld, jp, jr, etc.)
+and produces optimized Z80 assembly as output. All output uses
+lowercase mnemonics and register names.
 
 For compilers that generate 8080 mnemonics, use upeep80 instead.
 """
@@ -35,8 +36,8 @@ class PeepholeOptimizer:
     Applies pattern-based transformations to optimize Z80 code.
     Patterns are applied repeatedly until no more changes are made.
 
-    This optimizer expects pure Z80 mnemonics (LD, JP, JR, etc.)
-    as input and produces Z80 assembly output.
+    This optimizer expects pure Z80 mnemonics (ld, jp, jr, etc.)
+    as input and produces lowercase Z80 assembly output.
     """
 
     def __init__(self) -> None:
@@ -46,466 +47,466 @@ class PeepholeOptimizer:
     def _init_patterns(self) -> list[PeepholePattern]:
         """Initialize Z80 peephole optimization patterns."""
         return [
-            # Push/Pop elimination: PUSH rr; POP rr -> (nothing)
+            # Push/Pop elimination: push rr; pop rr -> (nothing)
             PeepholePattern(
                 name="push_pop_same",
-                pattern=[("PUSH", None), ("POP", None)],
+                pattern=[("push", None), ("pop", None)],
                 replacement=[],
-                condition=lambda ops: ops[0][1].upper() == ops[1][1].upper(),
+                condition=lambda ops: ops[0][1].lower() == ops[1][1].lower(),
             ),
-            # Redundant LD: LD A,r; LD r,A -> LD A,r
+            # Redundant ld: ld a,r; ld r,a -> ld a,r
             PeepholePattern(
                 name="redundant_ld",
-                pattern=[("LD", "A,*"), ("LD", "*,A")],
+                pattern=[("ld", "a,*"), ("ld", "*,a")],
                 replacement=None,  # Keep first only
-                condition=lambda ops: ops[0][1].split(",")[1].upper() == ops[1][1].split(",")[0].upper(),
+                condition=lambda ops: ops[0][1].split(",")[1].lower() == ops[1][1].split(",")[0].lower(),
             ),
-            # Zero A: LD A,0 -> XOR A (smaller, faster)
+            # Zero A: ld a,0 -> xor a (smaller, faster)
             PeepholePattern(
                 name="zero_a_ld",
-                pattern=[("LD", "A,0")],
-                replacement=[("XOR", "A")],
+                pattern=[("ld", "a,0")],
+                replacement=[("xor", "a")],
             ),
-            # Compare to zero: CP 0 -> OR A (sets Z flag, smaller)
+            # Compare to zero: cp 0 -> or a (sets Z flag, smaller)
             PeepholePattern(
                 name="cp_zero",
-                pattern=[("CP", "0")],
-                replacement=[("OR", "A")],
+                pattern=[("cp", "0")],
+                replacement=[("or", "a")],
             ),
-            # Redundant duplicate LD: LD X,Y; LD X,Y -> LD X,Y
+            # Redundant duplicate ld: ld x,y; ld x,y -> ld x,y
             PeepholePattern(
                 name="duplicate_ld",
-                pattern=[("LD", None), ("LD", None)],
+                pattern=[("ld", None), ("ld", None)],
                 replacement=None,  # Keep first only
-                condition=lambda ops: ops[0][1].upper() == ops[1][1].upper(),
+                condition=lambda ops: ops[0][1].lower() == ops[1][1].lower(),
             ),
-            # LD A,A -> (nothing, useless)
+            # ld a,a -> (nothing, useless)
             PeepholePattern(
                 name="ld_a_a",
-                pattern=[("LD", "A,A")],
+                pattern=[("ld", "a,a")],
                 replacement=[],
             ),
-            # LD B,B, LD C,C, etc. -> (nothing)
+            # ld b,b, ld c,c, etc. -> (nothing)
             PeepholePattern(
                 name="ld_r_r",
-                pattern=[("LD", None)],
+                pattern=[("ld", None)],
                 replacement=[],
                 condition=lambda ops: len(ops[0][1].split(",")) == 2 and
-                                      ops[0][1].split(",")[0].strip().upper() ==
-                                      ops[0][1].split(",")[1].strip().upper() and
-                                      ops[0][1].split(",")[0].strip().upper() in
-                                      ("A", "B", "C", "D", "E", "H", "L"),
+                                      ops[0][1].split(",")[0].strip().lower() ==
+                                      ops[0][1].split(",")[1].strip().lower() and
+                                      ops[0][1].split(",")[0].strip().lower() in
+                                      ("a", "b", "c", "d", "e", "h", "l"),
             ),
-            # INC A; DEC A -> (nothing)
+            # inc a; dec a -> (nothing)
             PeepholePattern(
                 name="inc_dec_a",
-                pattern=[("INC", "A"), ("DEC", "A")],
+                pattern=[("inc", "a"), ("dec", "a")],
                 replacement=[],
             ),
-            # DEC A; INC A -> (nothing)
+            # dec a; inc a -> (nothing)
             PeepholePattern(
                 name="dec_inc_a",
-                pattern=[("DEC", "A"), ("INC", "A")],
+                pattern=[("dec", "a"), ("inc", "a")],
                 replacement=[],
             ),
-            # INC HL; DEC HL -> (nothing)
+            # inc hl; dec hl -> (nothing)
             PeepholePattern(
                 name="inc_dec_hl",
-                pattern=[("INC", "HL"), ("DEC", "HL")],
+                pattern=[("inc", "hl"), ("dec", "hl")],
                 replacement=[],
             ),
-            # DEC HL; INC HL -> (nothing)
+            # dec hl; inc hl -> (nothing)
             PeepholePattern(
                 name="dec_inc_hl",
-                pattern=[("DEC", "HL"), ("INC", "HL")],
+                pattern=[("dec", "hl"), ("inc", "hl")],
                 replacement=[],
             ),
-            # INC DE; DEC DE -> (nothing)
+            # inc de; dec de -> (nothing)
             PeepholePattern(
                 name="inc_dec_de",
-                pattern=[("INC", "DE"), ("DEC", "DE")],
+                pattern=[("inc", "de"), ("dec", "de")],
                 replacement=[],
             ),
-            # DEC DE; INC DE -> (nothing)
+            # dec de; inc de -> (nothing)
             PeepholePattern(
                 name="dec_inc_de",
-                pattern=[("DEC", "DE"), ("INC", "DE")],
+                pattern=[("dec", "de"), ("inc", "de")],
                 replacement=[],
             ),
-            # INC BC; DEC BC -> (nothing)
+            # inc bc; dec bc -> (nothing)
             PeepholePattern(
                 name="inc_dec_bc",
-                pattern=[("INC", "BC"), ("DEC", "BC")],
+                pattern=[("inc", "bc"), ("dec", "bc")],
                 replacement=[],
             ),
-            # DEC BC; INC BC -> (nothing)
+            # dec bc; inc bc -> (nothing)
             PeepholePattern(
                 name="dec_inc_bc",
-                pattern=[("DEC", "BC"), ("INC", "BC")],
+                pattern=[("dec", "bc"), ("inc", "bc")],
                 replacement=[],
             ),
-            # OR A; OR A -> OR A
+            # or a; or a -> or a
             PeepholePattern(
                 name="double_or_a",
-                pattern=[("OR", "A"), ("OR", "A")],
-                replacement=[("OR", "A")],
+                pattern=[("or", "a"), ("or", "a")],
+                replacement=[("or", "a")],
             ),
-            # AND A; AND A -> AND A
+            # and a; and a -> and a
             PeepholePattern(
                 name="double_and_a",
-                pattern=[("AND", "A"), ("AND", "A")],
-                replacement=[("AND", "A")],
+                pattern=[("and", "a"), ("and", "a")],
+                replacement=[("and", "a")],
             ),
-            # XOR A; XOR A -> XOR A (still zero)
+            # xor a; xor a -> xor a (still zero)
             PeepholePattern(
                 name="double_xor_a",
-                pattern=[("XOR", "A"), ("XOR", "A")],
-                replacement=[("XOR", "A")],
+                pattern=[("xor", "a"), ("xor", "a")],
+                replacement=[("xor", "a")],
             ),
-            # EX DE,HL; EX DE,HL -> (nothing)
+            # ex de,hl; ex de,hl -> (nothing)
             PeepholePattern(
                 name="double_ex",
-                pattern=[("EX", "DE,HL"), ("EX", "DE,HL")],
+                pattern=[("ex", "de,hl"), ("ex", "de,hl")],
                 replacement=[],
             ),
-            # EX (SP),HL; EX (SP),HL -> (nothing)
+            # ex (sp),hl; ex (sp),hl -> (nothing)
             PeepholePattern(
                 name="double_ex_sp",
-                pattern=[("EX", "(SP),HL"), ("EX", "(SP),HL")],
+                pattern=[("ex", "(sp),hl"), ("ex", "(sp),hl")],
                 replacement=[],
             ),
-            # CCF; CCF -> (nothing) - complement carry twice
+            # ccf; ccf -> (nothing) - complement carry twice
             PeepholePattern(
                 name="double_ccf",
-                pattern=[("CCF", ""), ("CCF", "")],
+                pattern=[("ccf", ""), ("ccf", "")],
                 replacement=[],
             ),
-            # CPL; CPL -> (nothing) - complement A twice
+            # cpl; cpl -> (nothing) - complement A twice
             PeepholePattern(
                 name="double_cpl",
-                pattern=[("CPL", ""), ("CPL", "")],
+                pattern=[("cpl", ""), ("cpl", "")],
                 replacement=[],
             ),
-            # PUSH HL; POP DE -> LD D,H; LD E,L (faster: 21 cycles -> 8 cycles)
+            # push hl; pop de -> ld d,h; ld e,l (faster: 21 cycles -> 8 cycles)
             PeepholePattern(
                 name="push_pop_copy_hl_de",
-                pattern=[("PUSH", "HL"), ("POP", "DE")],
-                replacement=[("LD", "D,H"), ("LD", "E,L")],
+                pattern=[("push", "hl"), ("pop", "de")],
+                replacement=[("ld", "d,h"), ("ld", "e,l")],
             ),
-            # PUSH DE; POP HL -> LD H,D; LD L,E
+            # push de; pop hl -> ld h,d; ld l,e
             PeepholePattern(
                 name="push_pop_copy_de_hl",
-                pattern=[("PUSH", "DE"), ("POP", "HL")],
-                replacement=[("LD", "H,D"), ("LD", "L,E")],
+                pattern=[("push", "de"), ("pop", "hl")],
+                replacement=[("ld", "h,d"), ("ld", "l,e")],
             ),
-            # PUSH BC; POP DE -> LD D,B; LD E,C
+            # push bc; pop de -> ld d,b; ld e,c
             PeepholePattern(
                 name="push_pop_copy_bc_de",
-                pattern=[("PUSH", "BC"), ("POP", "DE")],
-                replacement=[("LD", "D,B"), ("LD", "E,C")],
+                pattern=[("push", "bc"), ("pop", "de")],
+                replacement=[("ld", "d,b"), ("ld", "e,c")],
             ),
-            # PUSH BC; POP HL -> LD H,B; LD L,C
+            # push bc; pop hl -> ld h,b; ld l,c
             PeepholePattern(
                 name="push_pop_copy_bc_hl",
-                pattern=[("PUSH", "BC"), ("POP", "HL")],
-                replacement=[("LD", "H,B"), ("LD", "L,C")],
+                pattern=[("push", "bc"), ("pop", "hl")],
+                replacement=[("ld", "h,b"), ("ld", "l,c")],
             ),
-            # PUSH HL; POP BC -> LD B,H; LD C,L
+            # push hl; pop bc -> ld b,h; ld c,l
             PeepholePattern(
                 name="push_pop_copy_hl_bc",
-                pattern=[("PUSH", "HL"), ("POP", "BC")],
-                replacement=[("LD", "B,H"), ("LD", "C,L")],
+                pattern=[("push", "hl"), ("pop", "bc")],
+                replacement=[("ld", "b,h"), ("ld", "c,l")],
             ),
-            # PUSH DE; POP BC -> LD B,D; LD C,E
+            # push de; pop bc -> ld b,d; ld c,e
             PeepholePattern(
                 name="push_pop_copy_de_bc",
-                pattern=[("PUSH", "DE"), ("POP", "BC")],
-                replacement=[("LD", "B,D"), ("LD", "C,E")],
+                pattern=[("push", "de"), ("pop", "bc")],
+                replacement=[("ld", "b,d"), ("ld", "c,e")],
             ),
-            # CCF; SCF -> SCF (set carry directly)
+            # ccf; scf -> scf (set carry directly)
             PeepholePattern(
                 name="ccf_scf",
-                pattern=[("CCF", None), ("SCF", None)],
-                replacement=[("SCF", "")],
+                pattern=[("ccf", None), ("scf", None)],
+                replacement=[("scf", "")],
             ),
-            # CALL x; RET -> JP x (tail call optimization)
+            # call x; ret -> jp x (tail call optimization)
             PeepholePattern(
                 name="tail_call",
-                pattern=[("CALL", None), ("RET", "")],
+                pattern=[("call", None), ("ret", "")],
                 replacement=None,  # Replaced specially
                 condition=lambda ops: True,
             ),
-            # RET; RET -> RET (unreachable code)
+            # ret; ret -> ret (unreachable code)
             PeepholePattern(
                 name="double_ret",
-                pattern=[("RET", ""), ("RET", "")],
-                replacement=[("RET", "")],
+                pattern=[("ret", ""), ("ret", "")],
+                replacement=[("ret", "")],
             ),
-            # LD A,(HL); LD E,A -> LD E,(HL)
+            # ld a,(hl); ld e,a -> ld e,(hl)
             PeepholePattern(
                 name="ld_a_hl_ld_ea",
-                pattern=[("LD", "A,(HL)"), ("LD", "E,A")],
-                replacement=[("LD", "E,(HL)")],
+                pattern=[("ld", "a,(hl)"), ("ld", "e,a")],
+                replacement=[("ld", "e,(hl)")],
             ),
-            # LD A,(HL); LD D,A -> LD D,(HL)
+            # ld a,(hl); ld d,a -> ld d,(hl)
             PeepholePattern(
                 name="ld_a_hl_ld_da",
-                pattern=[("LD", "A,(HL)"), ("LD", "D,A")],
-                replacement=[("LD", "D,(HL)")],
+                pattern=[("ld", "a,(hl)"), ("ld", "d,a")],
+                replacement=[("ld", "d,(hl)")],
             ),
-            # LD A,(HL); LD C,A -> LD C,(HL)
+            # ld a,(hl); ld c,a -> ld c,(hl)
             PeepholePattern(
                 name="ld_a_hl_ld_ca",
-                pattern=[("LD", "A,(HL)"), ("LD", "C,A")],
-                replacement=[("LD", "C,(HL)")],
+                pattern=[("ld", "a,(hl)"), ("ld", "c,a")],
+                replacement=[("ld", "c,(hl)")],
             ),
-            # LD A,(HL); LD B,A -> LD B,(HL)
+            # ld a,(hl); ld b,a -> ld b,(hl)
             PeepholePattern(
                 name="ld_a_hl_ld_ba",
-                pattern=[("LD", "A,(HL)"), ("LD", "B,A")],
-                replacement=[("LD", "B,(HL)")],
+                pattern=[("ld", "a,(hl)"), ("ld", "b,a")],
+                replacement=[("ld", "b,(hl)")],
             ),
-            # LD B,A; LD A,B -> LD B,A
+            # ld b,a; ld a,b -> ld b,a
             PeepholePattern(
                 name="ld_ba_ab",
-                pattern=[("LD", "B,A"), ("LD", "A,B")],
-                replacement=[("LD", "B,A")],
+                pattern=[("ld", "b,a"), ("ld", "a,b")],
+                replacement=[("ld", "b,a")],
             ),
-            # LD C,A; LD A,C -> LD C,A
+            # ld c,a; ld a,c -> ld c,a
             PeepholePattern(
                 name="ld_ca_ac",
-                pattern=[("LD", "C,A"), ("LD", "A,C")],
-                replacement=[("LD", "C,A")],
+                pattern=[("ld", "c,a"), ("ld", "a,c")],
+                replacement=[("ld", "c,a")],
             ),
-            # LD D,A; LD A,D -> LD D,A
+            # ld d,a; ld a,d -> ld d,a
             PeepholePattern(
                 name="ld_da_ad",
-                pattern=[("LD", "D,A"), ("LD", "A,D")],
-                replacement=[("LD", "D,A")],
+                pattern=[("ld", "d,a"), ("ld", "a,d")],
+                replacement=[("ld", "d,a")],
             ),
-            # LD E,A; LD A,E -> LD E,A
+            # ld e,a; ld a,e -> ld e,a
             PeepholePattern(
                 name="ld_ea_ae",
-                pattern=[("LD", "E,A"), ("LD", "A,E")],
-                replacement=[("LD", "E,A")],
+                pattern=[("ld", "e,a"), ("ld", "a,e")],
+                replacement=[("ld", "e,a")],
             ),
-            # LD H,A; LD A,H -> LD H,A
+            # ld h,a; ld a,h -> ld h,a
             PeepholePattern(
                 name="ld_ha_ah",
-                pattern=[("LD", "H,A"), ("LD", "A,H")],
-                replacement=[("LD", "H,A")],
+                pattern=[("ld", "h,a"), ("ld", "a,h")],
+                replacement=[("ld", "h,a")],
             ),
-            # LD L,A; LD A,L -> LD L,A
+            # ld l,a; ld a,l -> ld l,a
             PeepholePattern(
                 name="ld_la_al",
-                pattern=[("LD", "L,A"), ("LD", "A,L")],
-                replacement=[("LD", "L,A")],
+                pattern=[("ld", "l,a"), ("ld", "a,l")],
+                replacement=[("ld", "l,a")],
             ),
-            # LD (addr),HL; LD HL,(addr) -> LD (addr),HL (same address)
+            # ld (addr),hl; ld hl,(addr) -> ld (addr),hl (same address)
             PeepholePattern(
                 name="ld_store_load_same",
-                pattern=[("LD", None), ("LD", None)],
+                pattern=[("ld", None), ("ld", None)],
                 replacement=None,  # Keep first only
                 condition=lambda ops: (ops[0][1].startswith("(") and
-                                       ops[0][1].endswith("),HL") and
-                                       ops[1][1] == f"HL,{ops[0][1][:-3]}"),
+                                       ops[0][1].lower().endswith("),hl") and
+                                       ops[1][1].lower() == f"hl,{ops[0][1][:-3].lower()}"),
             ),
-            # LD (addr),A; LD A,(addr) -> LD (addr),A (same address)
+            # ld (addr),a; ld a,(addr) -> ld (addr),a (same address)
             PeepholePattern(
                 name="sta_lda_same",
-                pattern=[("LD", None), ("LD", None)],
+                pattern=[("ld", None), ("ld", None)],
                 replacement=None,  # Keep first only
                 condition=lambda ops: (ops[0][1].startswith("(") and
-                                       ops[0][1].endswith("),A") and
-                                       ops[1][1] == f"A,{ops[0][1][:-2]}"),
+                                       ops[0][1].lower().endswith("),a") and
+                                       ops[1][1].lower() == f"a,{ops[0][1][:-2].lower()}"),
             ),
-            # AND 0FFH -> OR A (same effect, smaller)
+            # and 0ffh -> or a (same effect, smaller)
             PeepholePattern(
                 name="and_ff",
-                pattern=[("AND", "0FFH")],
-                replacement=[("OR", "A")],
+                pattern=[("and", "0ffh")],
+                replacement=[("or", "a")],
             ),
-            # OR 0 -> OR A (same effect)
+            # or 0 -> or a (same effect)
             PeepholePattern(
                 name="or_0",
-                pattern=[("OR", "0")],
-                replacement=[("OR", "A")],
+                pattern=[("or", "0")],
+                replacement=[("or", "a")],
             ),
-            # XOR 0 -> OR A (same effect, sets flags)
+            # xor 0 -> or a (same effect, sets flags)
             PeepholePattern(
                 name="xor_0",
-                pattern=[("XOR", "0")],
-                replacement=[("OR", "A")],
+                pattern=[("xor", "0")],
+                replacement=[("or", "a")],
             ),
-            # PUSH HL; EX DE,HL; POP HL -> LD D,H; LD E,L
-            # The EX swaps HL<->DE, then POP restores HL, so DE = original HL
+            # push hl; ex de,hl; pop hl -> ld d,h; ld e,l
+            # The ex swaps hl<->de, then pop restores hl, so de = original hl
             PeepholePattern(
                 name="push_ex_pop",
-                pattern=[("PUSH", "HL"), ("EX", "DE,HL"), ("POP", "HL")],
-                replacement=[("LD", "D,H"), ("LD", "E,L")],
+                pattern=[("push", "hl"), ("ex", "de,hl"), ("pop", "hl")],
+                replacement=[("ld", "d,h"), ("ld", "e,l")],
             ),
-            # LD H,0; LD D,H; LD E,L -> LD D,0; LD E,L
-            # D = H = 0, so just load D directly with 0
+            # ld h,0; ld d,h; ld e,l -> ld d,0; ld e,l
+            # d = h = 0, so just load d directly with 0
             PeepholePattern(
                 name="ld_h0_dh_el",
-                pattern=[("LD", "H,0"), ("LD", "D,H"), ("LD", "E,L")],
-                replacement=[("LD", "D,0"), ("LD", "E,L")],
+                pattern=[("ld", "h,0"), ("ld", "d,h"), ("ld", "e,l")],
+                replacement=[("ld", "d,0"), ("ld", "e,l")],
             ),
-            # Wasteful byte extension before byte op: LD L,A; LD H,0; SUB x -> SUB x
-            # (Also for CP, AND, OR, XOR, ADD byte ops)
+            # Wasteful byte extension before byte op: ld l,a; ld h,0; sub x -> sub x
+            # (Also for cp, and, or, xor, add byte ops)
             PeepholePattern(
                 name="useless_extend_before_sub",
-                pattern=[("LD", "L,A"), ("LD", "H,0"), ("SUB", None)],
+                pattern=[("ld", "l,a"), ("ld", "h,0"), ("sub", None)],
                 replacement=None,  # Keep last only
                 condition=lambda ops: True,  # Always apply
             ),
             PeepholePattern(
                 name="useless_extend_before_cp",
-                pattern=[("LD", "L,A"), ("LD", "H,0"), ("CP", None)],
+                pattern=[("ld", "l,a"), ("ld", "h,0"), ("cp", None)],
                 replacement=None,  # Keep last only
                 condition=lambda ops: True,
             ),
-            # Redundant byte extension: LD L,A; LD H,0; LD L,A; LD H,0 -> LD L,A; LD H,0
+            # Redundant byte extension: ld l,a; ld h,0; ld l,a; ld h,0 -> ld l,a; ld h,0
             PeepholePattern(
                 name="double_byte_extend",
-                pattern=[("LD", "L,A"), ("LD", "H,0"), ("LD", "L,A"), ("LD", "H,0")],
-                replacement=[("LD", "L,A"), ("LD", "H,0")],
+                pattern=[("ld", "l,a"), ("ld", "h,0"), ("ld", "l,a"), ("ld", "h,0")],
+                replacement=[("ld", "l,a"), ("ld", "h,0")],
             ),
-            # Redundant load after push: LD L,A; LD H,0; PUSH HL; LD L,A -> LD L,A; LD H,0; PUSH HL
+            # Redundant load after push: ld l,a; ld h,0; push hl; ld l,a -> ld l,a; ld h,0; push hl
             PeepholePattern(
                 name="redundant_ld_l_after_push",
-                pattern=[("LD", "L,A"), ("LD", "H,0"), ("PUSH", "HL"), ("LD", "L,A")],
-                replacement=[("LD", "L,A"), ("LD", "H,0"), ("PUSH", "HL")],
+                pattern=[("ld", "l,a"), ("ld", "h,0"), ("push", "hl"), ("ld", "l,a")],
+                replacement=[("ld", "l,a"), ("ld", "h,0"), ("push", "hl")],
             ),
-            # LD HL,0FFFFH; LD A,L; OR H -> LD HL,0FFFFH; OR A
+            # ld hl,0ffffh; ld a,l; or h -> ld hl,0ffffh; or a
             # Since 0xFFFF is always true
             PeepholePattern(
                 name="test_true_const",
-                pattern=[("LD", "HL,0FFFFH"), ("LD", "A,L"), ("OR", "H")],
-                replacement=[("LD", "HL,0FFFFH"), ("OR", "A")],
+                pattern=[("ld", "hl,0ffffh"), ("ld", "a,l"), ("or", "h")],
+                replacement=[("ld", "hl,0ffffh"), ("or", "a")],
             ),
-            # LD HL,1; LD A,L; OR H -> LD A,1; OR A (smaller)
+            # ld hl,1; ld a,l; or h -> ld a,1; or a (smaller)
             PeepholePattern(
                 name="test_true_const_1",
-                pattern=[("LD", "HL,1"), ("LD", "A,L"), ("OR", "H")],
-                replacement=[("LD", "A,1"), ("OR", "A")],
+                pattern=[("ld", "hl,1"), ("ld", "a,l"), ("or", "h")],
+                replacement=[("ld", "a,1"), ("or", "a")],
             ),
-            # LD HL,1; LD C,L -> LD C,1 (for shift count)
+            # ld hl,1; ld c,l -> ld c,1 (for shift count)
             PeepholePattern(
                 name="ld_h1_cl",
-                pattern=[("LD", "HL,1"), ("LD", "C,L")],
-                replacement=[("LD", "C,1")],
+                pattern=[("ld", "hl,1"), ("ld", "c,l")],
+                replacement=[("ld", "c,1")],
             ),
-            # LD HL,0; LD A,L; OR H -> XOR A (sets Z, clears A)
+            # ld hl,0; ld a,l; or h -> xor a (sets Z, clears A)
             PeepholePattern(
                 name="test_false_const",
-                pattern=[("LD", "HL,0"), ("LD", "A,L"), ("OR", "H")],
-                replacement=[("XOR", "A")],
+                pattern=[("ld", "hl,0"), ("ld", "a,l"), ("or", "h")],
+                replacement=[("xor", "a")],
             ),
-            # PUSH HL; LD (addr),HL; POP HL -> LD (addr),HL
-            # LD (addr),HL doesn't modify HL
+            # push hl; ld (addr),hl; pop hl -> ld (addr),hl
+            # ld (addr),hl doesn't modify hl
             PeepholePattern(
                 name="push_shld_pop",
-                pattern=[("PUSH", "HL"), ("LD", None), ("POP", "HL")],
+                pattern=[("push", "hl"), ("ld", None), ("pop", "hl")],
                 replacement=None,  # Keep middle only
-                condition=lambda ops: ops[1][1].startswith("(") and ops[1][1].endswith("),HL"),
+                condition=lambda ops: ops[1][1].startswith("(") and ops[1][1].lower().endswith("),hl"),
             ),
-            # PUSH AF; LD (addr),A; POP AF -> LD (addr),A
+            # push af; ld (addr),a; pop af -> ld (addr),a
             # Saving/restoring A around a store of A is pointless
             PeepholePattern(
                 name="push_sta_pop",
-                pattern=[("PUSH", "AF"), ("LD", None), ("POP", "AF")],
+                pattern=[("push", "af"), ("ld", None), ("pop", "af")],
                 replacement=None,  # Keep middle only
-                condition=lambda ops: ops[1][1].startswith("(") and ops[1][1].endswith("),A"),
+                condition=lambda ops: ops[1][1].startswith("(") and ops[1][1].lower().endswith("),a"),
             ),
-            # LD A,L; LD H,0; LD (addr),A -> LD A,L; LD (addr),A
-            # MVI H,0 is useless before store
+            # ld a,l; ld h,0; ld (addr),a -> ld a,l; ld (addr),a
+            # mvi h,0 is useless before store
             PeepholePattern(
                 name="ld_al_h0_sta",
-                pattern=[("LD", "A,L"), ("LD", "H,0"), ("LD", None)],
-                replacement=None,  # Keep LD A,L and LD (addr),A
-                condition=lambda ops: ops[2][1].startswith("(") and ops[2][1].endswith("),A"),
+                pattern=[("ld", "a,l"), ("ld", "h,0"), ("ld", None)],
+                replacement=None,  # Keep ld a,l and ld (addr),a
+                condition=lambda ops: ops[2][1].startswith("(") and ops[2][1].lower().endswith("),a"),
             ),
-            # LD L,A; LD H,0; LD (addr),A -> LD (addr),A
-            # If we're just storing A, no need to extend to HL first
+            # ld l,a; ld h,0; ld (addr),a -> ld (addr),a
+            # If we're just storing A, no need to extend to hl first
             PeepholePattern(
                 name="ld_la_h0_sta",
-                pattern=[("LD", "L,A"), ("LD", "H,0"), ("LD", None)],
+                pattern=[("ld", "l,a"), ("ld", "h,0"), ("ld", None)],
                 replacement=None,  # Keep only store
-                condition=lambda ops: ops[2][1].startswith("(") and ops[2][1].endswith("),A"),
+                condition=lambda ops: ops[2][1].startswith("(") and ops[2][1].lower().endswith("),a"),
             ),
-            # LD A,L; LD H,0; OR H -> LD A,L; OR A
-            # H is 0, so OR H is same as OR A but OR A is smaller
+            # ld a,l; ld h,0; or h -> ld a,l; or a
+            # h is 0, so or h is same as or a but or a is smaller
             PeepholePattern(
                 name="ld_al_h0_or_h",
-                pattern=[("LD", "A,L"), ("LD", "H,0"), ("OR", "H")],
-                replacement=[("LD", "A,L"), ("OR", "A")],
+                pattern=[("ld", "a,l"), ("ld", "h,0"), ("or", "h")],
+                replacement=[("ld", "a,l"), ("or", "a")],
             ),
-            # LD H,0; OR H -> LD H,0; OR A
+            # ld h,0; or h -> ld h,0; or a
             PeepholePattern(
                 name="ld_h0_or_h",
-                pattern=[("LD", "H,0"), ("OR", "H")],
-                replacement=[("LD", "H,0"), ("OR", "A")],
+                pattern=[("ld", "h,0"), ("or", "h")],
+                replacement=[("ld", "h,0"), ("or", "a")],
             ),
             # Conditional jump followed by unconditional to same place
-            # JP Z,L; JP L -> JP L
+            # jp z,L; jp L -> jp L
             PeepholePattern(
                 name="cond_uncond_same_z",
-                pattern=[("JP", None), ("JP", None)],
+                pattern=[("jp", None), ("jp", None)],
                 replacement=None,  # Keep second only
-                condition=lambda ops: ops[0][1].startswith("Z,") and ops[0][1][2:] == ops[1][1],
+                condition=lambda ops: ops[0][1].lower().startswith("z,") and ops[0][1][2:] == ops[1][1],
             ),
             PeepholePattern(
                 name="cond_uncond_same_nz",
-                pattern=[("JP", None), ("JP", None)],
+                pattern=[("jp", None), ("jp", None)],
                 replacement=None,
-                condition=lambda ops: ops[0][1].startswith("NZ,") and ops[0][1][3:] == ops[1][1],
+                condition=lambda ops: ops[0][1].lower().startswith("nz,") and ops[0][1][3:] == ops[1][1],
             ),
             PeepholePattern(
                 name="cond_uncond_same_c",
-                pattern=[("JP", None), ("JP", None)],
+                pattern=[("jp", None), ("jp", None)],
                 replacement=None,
-                condition=lambda ops: ops[0][1].startswith("C,") and ops[0][1][2:] == ops[1][1],
+                condition=lambda ops: ops[0][1].lower().startswith("c,") and ops[0][1][2:] == ops[1][1],
             ),
             PeepholePattern(
                 name="cond_uncond_same_nc",
-                pattern=[("JP", None), ("JP", None)],
+                pattern=[("jp", None), ("jp", None)],
                 replacement=None,
-                condition=lambda ops: ops[0][1].startswith("NC,") and ops[0][1][3:] == ops[1][1],
+                condition=lambda ops: ops[0][1].lower().startswith("nc,") and ops[0][1][3:] == ops[1][1],
             ),
-            # LD A,(addr); CP y; JP Z,z; LD A,(addr) -> LD A,(addr); CP y; JP Z,z
-            # A unchanged after CP/Jcond
+            # ld a,(addr); cp y; jp z,z; ld a,(addr) -> ld a,(addr); cp y; jp z,z
+            # A unchanged after cp/Jcond
             PeepholePattern(
                 name="lda_cp_jz_lda_same",
-                pattern=[("LD", None), ("CP", None), ("JP", None), ("LD", None)],
+                pattern=[("ld", None), ("cp", None), ("jp", None), ("ld", None)],
                 replacement=None,  # Keep first 3 only
-                condition=lambda ops: (ops[0][1].startswith("A,(") and
-                                       ops[2][1].startswith("Z,") and
+                condition=lambda ops: (ops[0][1].lower().startswith("a,(") and
+                                       ops[2][1].lower().startswith("z,") and
                                        ops[0][1] == ops[3][1]),
             ),
             PeepholePattern(
                 name="lda_cp_jnz_lda_same",
-                pattern=[("LD", None), ("CP", None), ("JP", None), ("LD", None)],
+                pattern=[("ld", None), ("cp", None), ("jp", None), ("ld", None)],
                 replacement=None,
-                condition=lambda ops: (ops[0][1].startswith("A,(") and
-                                       ops[2][1].startswith("NZ,") and
+                condition=lambda ops: (ops[0][1].lower().startswith("a,(") and
+                                       ops[2][1].lower().startswith("nz,") and
                                        ops[0][1] == ops[3][1]),
             ),
-            # LD A,(addr); OR A; JP Z,z; LD A,(addr) -> LD A,(addr); OR A; JP Z,z
+            # ld a,(addr); or a; jp z,z; ld a,(addr) -> ld a,(addr); or a; jp z,z
             PeepholePattern(
                 name="lda_or_jz_lda_same",
-                pattern=[("LD", None), ("OR", "A"), ("JP", None), ("LD", None)],
+                pattern=[("ld", None), ("or", "a"), ("jp", None), ("ld", None)],
                 replacement=None,
-                condition=lambda ops: (ops[0][1].startswith("A,(") and
-                                       ops[2][1].startswith("Z,") and
+                condition=lambda ops: (ops[0][1].lower().startswith("a,(") and
+                                       ops[2][1].lower().startswith("z,") and
                                        ops[0][1] == ops[3][1]),
             ),
             PeepholePattern(
                 name="lda_or_jnz_lda_same",
-                pattern=[("LD", None), ("OR", "A"), ("JP", None), ("LD", None)],
+                pattern=[("ld", None), ("or", "a"), ("jp", None), ("ld", None)],
                 replacement=None,
-                condition=lambda ops: (ops[0][1].startswith("A,(") and
-                                       ops[2][1].startswith("NZ,") and
+                condition=lambda ops: (ops[0][1].lower().startswith("a,(") and
+                                       ops[2][1].lower().startswith("nz,") and
                                        ops[0][1] == ops[3][1]),
             ),
         ]
@@ -572,14 +573,14 @@ class PeepholeOptimizer:
                 i += 1
                 continue
 
-            if stripped.startswith('.') or stripped.upper().startswith(('ORG', 'EQU', 'DB', 'DW', 'DS')):
+            if stripped.startswith('.') or stripped.lower().startswith(('org', 'equ', 'db', 'dw', 'ds')):
                 result.append(line)
                 i += 1
                 continue
 
-            # Special case: JP/JR to immediately following label
+            # Special case: jp/jr to immediately following label
             parsed = self._parse_line(lines[i])
-            if parsed and parsed[0] in ("JP", "JR") and "," not in parsed[1] and parsed[1] != "(HL)":
+            if parsed and parsed[0] in ("jp", "jr") and "," not in parsed[1] and parsed[1].lower() != "(hl)":
                 target = parsed[1]
                 # Look ahead for the target label (skip comments/empty lines)
                 j = i + 1
@@ -668,9 +669,9 @@ class PeepholeOptimizer:
                         # Keep last instruction only
                         result.append(lines[instruction_lines[-1]])
                     elif pattern.name == "tail_call":
-                        # CALL x; RET -> JP x
+                        # call x; ret -> jp x
                         call_target = instrs[0][1]
-                        result.append(f"    JP {call_target}")
+                        result.append(f"    jp {call_target}")
                     elif pattern.name == "push_shld_pop":
                         # Keep middle only
                         result.append(lines[instruction_lines[1]])
@@ -721,177 +722,177 @@ class PeepholeOptimizer:
             if parsed:
                 opcode, operands = parsed
 
-                # LD A,0 -> XOR A (1 byte vs 2)
-                if opcode == "LD" and operands == "A,0":
-                    result.append("\tXOR A")
+                # ld a,0 -> xor a (1 byte vs 2)
+                if opcode == "ld" and operands.lower() == "a,0":
+                    result.append("\txor a")
                     changed = True
                     self.stats["xor_a"] = self.stats.get("xor_a", 0) + 1
                     i += 1
                     continue
 
-                # LD A,(addr); INC A; LD (addr),A -> LD HL,addr; INC (HL)
-                if opcode == "LD" and operands.startswith("A,(") and operands.endswith(")"):
+                # ld a,(addr); inc a; ld (addr),a -> ld hl,addr; inc (hl)
+                if opcode == "ld" and operands.lower().startswith("a,(") and operands.endswith(")"):
                     addr = operands[3:-1]  # Extract address
                     if i + 2 < len(lines):
                         p1 = self._parse_line(lines[i + 1].strip())
                         p2 = self._parse_line(lines[i + 2].strip())
-                        if (p1 and p1[0] == "INC" and p1[1] == "A" and
-                            p2 and p2[0] == "LD" and p2[1] == f"({addr}),A"):
-                            result.append(f"\tLD HL,{addr}")
-                            result.append("\tINC (HL)")
+                        if (p1 and p1[0] == "inc" and p1[1].lower() == "a" and
+                            p2 and p2[0] == "ld" and p2[1].lower() == f"({addr.lower()}),a"):
+                            result.append(f"\tld hl,{addr}")
+                            result.append("\tinc (hl)")
                             changed = True
                             self.stats["inc_mem"] = self.stats.get("inc_mem", 0) + 1
                             i += 3
                             continue
-                        # Also check for DEC A
-                        if (p1 and p1[0] == "DEC" and p1[1] == "A" and
-                            p2 and p2[0] == "LD" and p2[1] == f"({addr}),A"):
-                            result.append(f"\tLD HL,{addr}")
-                            result.append("\tDEC (HL)")
+                        # Also check for dec a
+                        if (p1 and p1[0] == "dec" and p1[1].lower() == "a" and
+                            p2 and p2[0] == "ld" and p2[1].lower() == f"({addr.lower()}),a"):
+                            result.append(f"\tld hl,{addr}")
+                            result.append("\tdec (hl)")
                             changed = True
                             self.stats["dec_mem"] = self.stats.get("dec_mem", 0) + 1
                             i += 3
                             continue
 
-                # EX DE,HL; EX DE,HL -> (nothing)
-                if opcode == "EX" and operands == "DE,HL" and i + 1 < len(lines):
+                # ex de,hl; ex de,hl -> (nothing)
+                if opcode == "ex" and operands.lower() == "de,hl" and i + 1 < len(lines):
                     next_parsed = self._parse_line(lines[i + 1].strip())
-                    if next_parsed and next_parsed[0] == "EX" and next_parsed[1] == "DE,HL":
+                    if next_parsed and next_parsed[0] == "ex" and next_parsed[1].lower() == "de,hl":
                         changed = True
                         self.stats["double_ex"] = self.stats.get("double_ex", 0) + 1
                         i += 2
                         continue
 
-                # INC HL; DEC HL -> (nothing)
-                if opcode == "INC" and operands == "HL" and i + 1 < len(lines):
+                # inc hl; dec hl -> (nothing)
+                if opcode == "inc" and operands.lower() == "hl" and i + 1 < len(lines):
                     next_parsed = self._parse_line(lines[i + 1].strip())
-                    if next_parsed and next_parsed[0] == "DEC" and next_parsed[1] == "HL":
+                    if next_parsed and next_parsed[0] == "dec" and next_parsed[1].lower() == "hl":
                         changed = True
                         self.stats["inc_dec_hl"] = self.stats.get("inc_dec_hl", 0) + 1
                         i += 2
                         continue
 
-                # DEC HL; INC HL -> (nothing)
-                if opcode == "DEC" and operands == "HL" and i + 1 < len(lines):
+                # dec hl; inc hl -> (nothing)
+                if opcode == "dec" and operands.lower() == "hl" and i + 1 < len(lines):
                     next_parsed = self._parse_line(lines[i + 1].strip())
-                    if next_parsed and next_parsed[0] == "INC" and next_parsed[1] == "HL":
+                    if next_parsed and next_parsed[0] == "inc" and next_parsed[1].lower() == "hl":
                         changed = True
                         self.stats["dec_inc_hl"] = self.stats.get("dec_inc_hl", 0) + 1
                         i += 2
                         continue
 
-                # LD (addr),HL; LD HL,(addr) -> LD (addr),HL (same address)
-                if opcode == "LD" and operands.startswith("(") and operands.endswith("),HL"):
+                # ld (addr),hl; ld hl,(addr) -> ld (addr),hl (same address)
+                if opcode == "ld" and operands.startswith("(") and operands.lower().endswith("),hl"):
                     addr = operands[1:-4]
                     if i + 1 < len(lines):
                         next_parsed = self._parse_line(lines[i + 1].strip())
-                        if next_parsed and next_parsed[0] == "LD" and next_parsed[1] == f"HL,({addr})":
+                        if next_parsed and next_parsed[0] == "ld" and next_parsed[1].lower() == f"hl,({addr.lower()})":
                             result.append(lines[i])
                             changed = True
                             self.stats["ld_hl_same"] = self.stats.get("ld_hl_same", 0) + 1
                             i += 2
                             continue
 
-                # DEC B; JR/JP NZ,label -> DJNZ label
-                if opcode == "DEC" and operands == "B" and i + 1 < len(lines):
+                # dec b; jr/jp nz,label -> djnz label
+                if opcode == "dec" and operands.lower() == "b" and i + 1 < len(lines):
                     next_parsed = self._parse_line(lines[i + 1].strip())
-                    if next_parsed and next_parsed[0] in ("JR", "JP") and next_parsed[1].startswith("NZ,"):
+                    if next_parsed and next_parsed[0] in ("jr", "jp") and next_parsed[1].lower().startswith("nz,"):
                         target = next_parsed[1][3:]  # Remove "NZ,"
                         if target in label_lines:
                             distance = label_lines[target] - i
                             if -50 < distance < 50:
-                                result.append(f"\tDJNZ {target}")
+                                result.append(f"\tdjnz {target}")
                                 changed = True
                                 self.stats["djnz"] = self.stats.get("djnz", 0) + 1
                                 i += 2
                                 continue
 
-                # PUSH HL; LD HL,(addr); EX DE,HL; POP HL -> LD DE,(addr)
-                # Z80 has direct LD DE,(addr) which 8080 doesn't have
-                if opcode == "PUSH" and operands == "HL" and i + 3 < len(lines):
+                # push hl; ld hl,(addr); ex de,hl; pop hl -> ld de,(addr)
+                # Z80 has direct ld de,(addr) which 8080 doesn't have
+                if opcode == "push" and operands.lower() == "hl" and i + 3 < len(lines):
                     p1 = self._parse_line(lines[i + 1].strip())
                     p2 = self._parse_line(lines[i + 2].strip())
                     p3 = self._parse_line(lines[i + 3].strip())
-                    if (p1 and p1[0] == "LD" and p1[1].startswith("HL,(") and p1[1].endswith(")") and
-                        p2 and p2[0] == "EX" and p2[1] == "DE,HL" and
-                        p3 and p3[0] == "POP" and p3[1] == "HL"):
+                    if (p1 and p1[0] == "ld" and p1[1].lower().startswith("hl,(") and p1[1].endswith(")") and
+                        p2 and p2[0] == "ex" and p2[1].lower() == "de,hl" and
+                        p3 and p3[0] == "pop" and p3[1].lower() == "hl"):
                         addr = p1[1][3:]  # Get (addr) including parens
-                        result.append(f"\tLD DE,{addr}")
+                        result.append(f"\tld de,{addr}")
                         changed = True
                         self.stats["ld_de_addr"] = self.stats.get("ld_de_addr", 0) + 1
                         i += 4
                         continue
 
-                # PUSH AF; LD (addr),A; POP AF -> LD (addr),A
-                if opcode == "PUSH" and operands == "AF" and i + 2 < len(lines):
+                # push af; ld (addr),a; pop af -> ld (addr),a
+                if opcode == "push" and operands.lower() == "af" and i + 2 < len(lines):
                     p1 = self._parse_line(lines[i + 1].strip())
                     p2 = self._parse_line(lines[i + 2].strip())
-                    if (p1 and p1[0] == "LD" and p1[1].startswith("(") and p1[1].endswith("),A") and
-                        p2 and p2[0] == "POP" and p2[1] == "AF"):
-                        result.append(lines[i + 1])  # Keep only LD (addr),A
+                    if (p1 and p1[0] == "ld" and p1[1].startswith("(") and p1[1].lower().endswith("),a") and
+                        p2 and p2[0] == "pop" and p2[1].lower() == "af"):
+                        result.append(lines[i + 1])  # Keep only ld (addr),a
                         changed = True
                         self.stats["push_sta_pop"] = self.stats.get("push_sta_pop", 0) + 1
                         i += 3
                         continue
 
-                # LD HL,const; LD r,L -> LD r,const
-                if opcode == "LD" and operands.startswith("HL,") and not operands.startswith("HL,("):
+                # ld hl,const; ld r,l -> ld r,const
+                if opcode == "ld" and operands.lower().startswith("hl,") and not operands.lower().startswith("hl,("):
                     const_val = operands[3:]
                     if i + 1 < len(lines):
                         p1 = self._parse_line(lines[i + 1].strip())
-                        if p1 and p1[0] == "LD" and p1[1].endswith(",L"):
+                        if p1 and p1[0] == "ld" and p1[1].lower().endswith(",l"):
                             dest_reg = p1[1][:-2]  # Get destination register
-                            if dest_reg in ("A", "B", "C", "D", "E"):
-                                result.append(f"\tLD {dest_reg},{const_val}")
+                            if dest_reg.lower() in ("a", "b", "c", "d", "e"):
+                                result.append(f"\tld {dest_reg.lower()},{const_val}")
                                 changed = True
                                 self.stats["ld_via_hl"] = self.stats.get("ld_via_hl", 0) + 1
                                 i += 2
                                 continue
 
-                # POP HL; PUSH HL; LD HL,x -> LD HL,x
-                if opcode == "POP" and operands == "HL" and i + 2 < len(lines):
+                # pop hl; push hl; ld hl,x -> ld hl,x
+                if opcode == "pop" and operands.lower() == "hl" and i + 2 < len(lines):
                     p1 = self._parse_line(lines[i + 1].strip())
                     p2 = self._parse_line(lines[i + 2].strip())
-                    if (p1 and p1[0] == "PUSH" and p1[1] == "HL" and
-                        p2 and p2[0] == "LD" and p2[1].startswith("HL,")):
-                        result.append(lines[i + 2])  # Keep only LD HL,x
+                    if (p1 and p1[0] == "push" and p1[1].lower() == "hl" and
+                        p2 and p2[0] == "ld" and p2[1].lower().startswith("hl,")):
+                        result.append(lines[i + 2])  # Keep only ld hl,x
                         changed = True
                         self.stats["pop_push_ld"] = self.stats.get("pop_push_ld", 0) + 1
                         i += 3
                         continue
 
-                # LD HL,0; LD A,L; LD (addr),A -> XOR A; LD (addr),A; LD HL,0
-                if opcode == "LD" and operands == "HL,0":
+                # ld hl,0; ld a,l; ld (addr),a -> xor a; ld (addr),a; ld hl,0
+                if opcode == "ld" and operands.lower() == "hl,0":
                     if i + 2 < len(lines):
                         p1 = self._parse_line(lines[i + 1].strip())
                         p2 = self._parse_line(lines[i + 2].strip())
-                        if (p1 and p1[0] == "LD" and p1[1] == "A,L" and
-                            p2 and p2[0] == "LD" and p2[1].startswith("(") and p2[1].endswith("),A")):
+                        if (p1 and p1[0] == "ld" and p1[1].lower() == "a,l" and
+                            p2 and p2[0] == "ld" and p2[1].startswith("(") and p2[1].lower().endswith("),a")):
                             addr = p2[1][:-2]  # Get (addr) part
-                            result.append("\tXOR A")
-                            result.append(f"\tLD {addr},A")
-                            result.append("\tLD HL,0")
+                            result.append("\txor a")
+                            result.append(f"\tld {addr},a")
+                            result.append("\tld hl,0")
                             changed = True
                             self.stats["xor_a_store"] = self.stats.get("xor_a_store", 0) + 1
                             i += 3
                             continue
 
-                # LD HL,(addr1); PUSH HL; LD HL,(addr2); EX DE,HL; POP HL
-                # -> LD DE,(addr2); LD HL,(addr1)
-                if opcode == "LD" and operands.startswith("HL,(") and operands.endswith(")"):
+                # ld hl,(addr1); push hl; ld hl,(addr2); ex de,hl; pop hl
+                # -> ld de,(addr2); ld hl,(addr1)
+                if opcode == "ld" and operands.lower().startswith("hl,(") and operands.endswith(")"):
                     addr1 = operands[3:]  # Keep the (addr) part
                     if i + 4 < len(lines):
                         p1 = self._parse_line(lines[i + 1].strip())
                         p2 = self._parse_line(lines[i + 2].strip())
                         p3 = self._parse_line(lines[i + 3].strip())
                         p4 = self._parse_line(lines[i + 4].strip())
-                        if (p1 and p1[0] == "PUSH" and p1[1] == "HL" and
-                            p2 and p2[0] == "LD" and p2[1].startswith("HL,(") and
-                            p3 and p3[0] == "EX" and p3[1] == "DE,HL" and
-                            p4 and p4[0] == "POP" and p4[1] == "HL"):
+                        if (p1 and p1[0] == "push" and p1[1].lower() == "hl" and
+                            p2 and p2[0] == "ld" and p2[1].lower().startswith("hl,(") and
+                            p3 and p3[0] == "ex" and p3[1].lower() == "de,hl" and
+                            p4 and p4[0] == "pop" and p4[1].lower() == "hl"):
                             addr2 = p2[1][3:]  # Get (addr2)
-                            result.append(f"\tLD DE,{addr2}")
-                            result.append(f"\tLD HL,{addr1}")
+                            result.append(f"\tld de,{addr2}")
+                            result.append(f"\tld hl,{addr1}")
                             changed = True
                             self.stats["ld_de_nn"] = self.stats.get("ld_de_nn", 0) + 1
                             i += 5
@@ -903,7 +904,7 @@ class PeepholeOptimizer:
         return result, changed
 
     def _convert_to_relative_jumps(self, lines: list[str]) -> list[str]:
-        """Convert JP to JR where the jump is within range."""
+        """Convert jp to jr where the jump is within range."""
         # First pass: find all label positions
         label_lines: dict[str, int] = {}
         for i, line in enumerate(lines):
@@ -922,16 +923,16 @@ class PeepholeOptimizer:
 
                 # Check for convertible jumps
                 convert_map = {
-                    "JP": ("JR", None),
-                    "JP Z,": ("JR Z,", 5),
-                    "JP NZ,": ("JR NZ,", 6),
-                    "JP C,": ("JR C,", 5),
-                    "JP NC,": ("JR NC,", 6),
+                    "jp": ("jr", None),
+                    "jp z,": ("jr z,", 5),
+                    "jp nz,": ("jr nz,", 6),
+                    "jp c,": ("jr c,", 5),
+                    "jp nc,": ("jr nc,", 6),
                 }
 
                 for jp_prefix, (jr_prefix, prefix_len) in convert_map.items():
                     if prefix_len:
-                        if opcode == "JP" and operands.startswith(jp_prefix[3:]):
+                        if opcode == "jp" and operands.lower().startswith(jp_prefix[3:]):
                             # Conditional jump
                             target = operands[prefix_len - 3:].strip()
                             if target in label_lines:
@@ -942,13 +943,13 @@ class PeepholeOptimizer:
                                     self.stats["jr_convert"] = self.stats.get("jr_convert", 0) + 1
                                     break
                     else:
-                        if opcode == "JP" and "," not in operands and operands != "(HL)":
-                            # Unconditional JP to label
+                        if opcode == "jp" and "," not in operands and operands.lower() != "(hl)":
+                            # Unconditional jp to label
                             target = operands.strip()
                             if target in label_lines:
                                 distance = label_lines[target] - i
                                 if -40 < distance < 40:
-                                    result.append(f"\tJR {target}")
+                                    result.append(f"\tjr {target}")
                                     self.stats["jr_convert"] = self.stats.get("jr_convert", 0) + 1
                                     break
                 else:
@@ -992,7 +993,7 @@ class PeepholeOptimizer:
         for label, (_, first_instr) in label_info.items():
             if first_instr:
                 parsed = self._parse_line(first_instr)
-                if parsed and parsed[0] in ("JP", "JR") and "," not in parsed[1] and parsed[1] != "(HL)":
+                if parsed and parsed[0] in ("jp", "jr") and "," not in parsed[1] and parsed[1].lower() != "(hl)":
                     target = parsed[1].strip()
                     # Follow the chain
                     visited = {label}
@@ -1001,7 +1002,7 @@ class PeepholeOptimizer:
                         _, target_instr = label_info[target]
                         if target_instr:
                             target_parsed = self._parse_line(target_instr)
-                            if target_parsed and target_parsed[0] in ("JP", "JR") and "," not in target_parsed[1] and target_parsed[1] != "(HL)":
+                            if target_parsed and target_parsed[0] in ("jp", "jr") and "," not in target_parsed[1] and target_parsed[1].lower() != "(hl)":
                                 target = target_parsed[1].strip()
                             else:
                                 break
@@ -1019,7 +1020,7 @@ class PeepholeOptimizer:
             stripped = line.strip()
             parsed = self._parse_line(stripped)
 
-            if parsed and parsed[0] in ("JP", "JR", "CALL", "DJNZ"):
+            if parsed and parsed[0] in ("jp", "jr", "call", "djnz"):
                 operands = parsed[1]
                 # Handle conditional jumps
                 if "," in operands:
@@ -1031,12 +1032,12 @@ class PeepholeOptimizer:
                     prefix = ""
 
                 # Thread through for unconditional jumps only
-                if parsed[0] in ("JP", "JR") and not prefix and target in label_target:
+                if parsed[0] in ("jp", "jr") and not prefix and target in label_target:
                     new_target = label_target[target]
-                    if parsed[0] == "JP":
-                        result.append(f"\tJP {new_target}")
+                    if parsed[0] == "jp":
+                        result.append(f"\tjp {new_target}")
                     else:
-                        result.append(f"\tJR {new_target}")
+                        result.append(f"\tjr {new_target}")
                     changed = True
                     self.stats["jump_thread"] = self.stats.get("jump_thread", 0) + 1
                     label_refs[new_target] = label_refs.get(new_target, 0) + 1
@@ -1044,12 +1045,12 @@ class PeepholeOptimizer:
                     result.append(line)
                     if target in label_refs:
                         label_refs[target] += 1
-            elif parsed and parsed[0] == "DW":
-                # Thread DW references
+            elif parsed and parsed[0] == "dw":
+                # Thread dw references
                 target = parsed[1].strip()
                 if target in label_target:
                     new_target = label_target[target]
-                    result.append(f"\tDW\t{new_target}")
+                    result.append(f"\tdw\t{new_target}")
                     changed = True
                     self.stats["dw_thread"] = self.stats.get("dw_thread", 0) + 1
                     label_refs[new_target] = label_refs.get(new_target, 0) + 1
@@ -1087,7 +1088,7 @@ class PeepholeOptimizer:
                             break
                         prev_parsed = self._parse_line(prev)
                         if prev_parsed:
-                            if prev_parsed[0] in ("JP", "JR", "RET") and "," not in prev_parsed[1]:
+                            if prev_parsed[0] in ("jp", "jr", "ret") and "," not in prev_parsed[1]:
                                 can_fallthrough = False
                             break
 
@@ -1102,7 +1103,7 @@ class PeepholeOptimizer:
                                 i += 1
                                 continue
                             next_parsed = self._parse_line(next_line)
-                            if next_parsed and next_parsed[0] in ("JP", "JR"):
+                            if next_parsed and next_parsed[0] in ("jp", "jr"):
                                 i += 1
                                 break
                             break
@@ -1128,16 +1129,16 @@ class PeepholeOptimizer:
             line = lines[i]
             stripped = line.strip()
 
-            # Look for procedure entry (label followed by LD (addr),A)
+            # Look for procedure entry (label followed by ld (addr),a)
             if ":" in stripped and not stripped.startswith("\t") and not stripped.startswith(";"):
                 label = stripped.split(":")[0].strip()
                 if i + 1 < len(lines):
                     next_stripped = lines[i + 1].strip()
                     parsed = self._parse_line(next_stripped)
-                    # Check for LD (addr),A pattern
-                    if (parsed and parsed[0] == "LD" and
-                        parsed[1].startswith("(") and parsed[1].endswith("),A")):
-                        addr = parsed[1][1:-3]  # Extract addr from (addr),A
+                    # Check for ld (addr),a pattern
+                    if (parsed and parsed[0] == "ld" and
+                        parsed[1].startswith("(") and parsed[1].lower().endswith("),a")):
+                        addr = parsed[1][1:-3]  # Extract addr from (addr),a
                         # Find end of procedure
                         proc_end = i + 2
                         while proc_end < len(lines):
@@ -1153,9 +1154,9 @@ class PeepholeOptimizer:
                         addr_loaded = False
                         for j in range(i + 2, proc_end):
                             check_line = lines[j].strip()
-                            if f"({addr})" in check_line:
+                            if f"({addr})" in check_line.lower() or f"({addr.lower()})" in check_line.lower():
                                 p = self._parse_line(check_line)
-                                if p and p[0] == "LD":
+                                if p and p[0] == "ld":
                                     if not p[1].startswith("("):
                                         addr_loaded = True
                                         break
@@ -1187,14 +1188,14 @@ class PeepholeOptimizer:
             else:
                 return None
 
-        # Skip directives
-        directives = {"ORG", "END", "DB", "DW", "DS", "EQU", "PUBLIC", "EXTRN"}
+        # Skip directives (but not dw which we may need to thread)
+        directives = {"org", "end", "db", "ds", "equ", "public", "extrn"}
 
         parts = line.split(None, 1)
         if not parts:
             return None
 
-        opcode = parts[0].upper()
+        opcode = parts[0].lower()
         if opcode in directives:
             return None
 
@@ -1221,7 +1222,7 @@ class PeepholeOptimizer:
                     pat_re = pat_operands.replace("*", ".*")
                     if not re.match(pat_re, inst_operands, re.IGNORECASE):
                         return False
-                elif pat_operands.upper() != inst_operands.upper():
+                elif pat_operands.lower() != inst_operands.lower():
                     return False
 
         return True
@@ -1231,7 +1232,7 @@ def optimize(asm_text: str) -> str:
     """Optimize Z80 assembly code.
 
     This is the main entry point for the optimizer.
-    Pass Z80 assembly text (using LD, JP, JR, etc. mnemonics)
+    Pass Z80 assembly text (using ld, jp, jr, etc. mnemonics)
     and receive optimized Z80 assembly back.
     """
     optimizer = PeepholeOptimizer()
