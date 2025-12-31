@@ -730,6 +730,46 @@ class PeepholeOptimizer:
                     i += 1
                     continue
 
+                # ld de,1/2/3; add hl,de -> inc hl (repeated)
+                # Saves 3/2/1 bytes respectively
+                if opcode == "ld" and operands.lower().startswith("de,"):
+                    const_str = operands[3:].strip()
+                    const_val = self._parse_const(const_str)
+                    if const_val is not None and 1 <= const_val <= 3:
+                        if i + 1 < len(lines):
+                            p1 = self._parse_line(lines[i + 1].strip())
+                            if p1 and p1[0] == "add" and p1[1].lower() == "hl,de":
+                                for _ in range(const_val):
+                                    result.append("\tinc hl")
+                                changed = True
+                                self.stats["inc_hl_const"] = self.stats.get("inc_hl_const", 0) + 1
+                                i += 2
+                                continue
+
+                # ld de,{power-of-2}; call ??mul16 -> add hl,hl (repeated)
+                # Strength reduction for multiply by power of 2
+                if opcode == "ld" and operands.lower().startswith("de,"):
+                    const_str = operands[3:].strip()
+                    const_val = self._parse_const(const_str)
+                    if const_val is not None and const_val > 1:
+                        # Check if power of 2: x & (x-1) == 0
+                        if (const_val & (const_val - 1)) == 0:
+                            if i + 1 < len(lines):
+                                p1 = self._parse_line(lines[i + 1].strip())
+                                if p1 and p1[0] == "call" and p1[1].lower() in ("??mul16", "@mul16"):
+                                    # Count shifts needed (log2)
+                                    shift_count = 0
+                                    temp = const_val
+                                    while temp > 1:
+                                        temp >>= 1
+                                        shift_count += 1
+                                    for _ in range(shift_count):
+                                        result.append("\tadd hl,hl")
+                                    changed = True
+                                    self.stats["mul_strength"] = self.stats.get("mul_strength", 0) + 1
+                                    i += 2
+                                    continue
+
                 # ld a,(addr); inc a; ld (addr),a -> ld hl,addr; inc (hl)
                 if opcode == "ld" and operands.lower().startswith("a,(") and operands.endswith(")"):
                     addr = operands[3:-1]  # Extract address
@@ -806,6 +846,40 @@ class PeepholeOptimizer:
                                 self.stats["djnz"] = self.stats.get("djnz", 0) + 1
                                 i += 2
                                 continue
+
+                # 8080-style 16-bit right shift to Z80 native:
+                # or a / ld a,h / rra / ld h,a / ld a,l / rra / ld l,a -> srl h / rr l
+                # (7 instructions -> 2 instructions)
+                if opcode == "or" and operands.lower() == "a" and i + 6 < len(lines):
+                    p1 = self._parse_line(lines[i + 1].strip())
+                    p2 = self._parse_line(lines[i + 2].strip())
+                    p3 = self._parse_line(lines[i + 3].strip())
+                    p4 = self._parse_line(lines[i + 4].strip())
+                    p5 = self._parse_line(lines[i + 5].strip())
+                    p6 = self._parse_line(lines[i + 6].strip())
+                    if (p1 and p1[0] == "ld" and p1[1].lower() == "a,h" and
+                        p2 and p2[0] == "rra" and
+                        p3 and p3[0] == "ld" and p3[1].lower() == "h,a" and
+                        p4 and p4[0] == "ld" and p4[1].lower() == "a,l" and
+                        p5 and p5[0] == "rra" and
+                        p6 and p6[0] == "ld" and p6[1].lower() == "l,a"):
+                        result.append("\tsrl h")
+                        result.append("\trr l")
+                        changed = True
+                        self.stats["shr_z80"] = self.stats.get("shr_z80", 0) + 1
+                        i += 7
+                        continue
+
+                # Compare to zero via ??subde: ld de,0 / call ??subde -> (remove, just test)
+                # The subtraction of 0 is pointless before a zero test
+                if opcode == "ld" and operands.lower() == "de,0" and i + 1 < len(lines):
+                    p1 = self._parse_line(lines[i + 1].strip())
+                    if p1 and p1[0] == "call" and p1[1].lower() in ("??subde", "@subde"):
+                        # Skip both instructions - the value in HL is unchanged
+                        changed = True
+                        self.stats["subde_zero"] = self.stats.get("subde_zero", 0) + 1
+                        i += 2
+                        continue
 
                 # push hl; ld hl,(addr); ex de,hl; pop hl -> ld de,(addr)
                 # Z80 has direct ld de,(addr) which 8080 doesn't have
@@ -1139,18 +1213,25 @@ class PeepholeOptimizer:
                     if (parsed and parsed[0] == "ld" and
                         parsed[1].startswith("(") and parsed[1].lower().endswith("),a")):
                         addr = parsed[1][1:-3]  # Extract addr from (addr),a
-                        # Find end of procedure
+                        # Find end of procedure - look for next top-level procedure
+                        # (non-nested label that doesn't start with @ or ?? and isn't
+                        # preceded by whitespace)
                         proc_end = i + 2
+                        proc_label = label
                         while proc_end < len(lines):
                             end_stripped = lines[proc_end].strip()
                             if (":" in end_stripped and
                                 not end_stripped.startswith("\t") and
-                                not end_stripped.startswith(";") and
-                                end_stripped.split(":")[0].strip().startswith("@")):
-                                break
+                                not end_stripped.startswith(";")):
+                                lbl = end_stripped.split(":")[0].strip()
+                                # Stop at next top-level procedure (not starting with @ or ??)
+                                # Nested procedures start with @ and internal labels with ??
+                                if not lbl.startswith("@") and not lbl.startswith("??"):
+                                    break
                             proc_end += 1
 
                         # Check if addr is ever loaded within this procedure
+                        # (including nested procedures that may access enclosing params)
                         addr_loaded = False
                         for j in range(i + 2, proc_end):
                             check_line = lines[j].strip()
@@ -1202,6 +1283,32 @@ class PeepholeOptimizer:
         operands = parts[1].split(";")[0].strip() if len(parts) > 1 else ""
 
         return (opcode, operands)
+
+    def _parse_const(self, s: str) -> int | None:
+        """Parse an assembly constant value. Returns None if not a constant."""
+        s = s.strip().upper()
+        if not s:
+            return None
+        # Skip if it's a label/symbol reference (starts with letter but not a number format)
+        if s[0].isalpha() and not s.endswith('H') and not s.endswith('B') and not s.endswith('O'):
+            return None
+        try:
+            # Handle hex (0FFH, 10H, 0x10)
+            if s.endswith('H'):
+                return int(s[:-1], 16)
+            # Handle binary (10101B)
+            if s.endswith('B') and all(c in '01' for c in s[:-1]):
+                return int(s[:-1], 2)
+            # Handle octal (77O, 77Q)
+            if s.endswith('O') or s.endswith('Q'):
+                return int(s[:-1], 8)
+            # Handle 0x prefix
+            if s.startswith('0X'):
+                return int(s, 16)
+            # Plain decimal
+            return int(s)
+        except ValueError:
+            return None
 
     def _matches_pattern(
         self, pattern: PeepholePattern, instructions: list[tuple[str, str]]
