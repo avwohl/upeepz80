@@ -756,7 +756,7 @@ class PeepholeOptimizer:
                         if (const_val & (const_val - 1)) == 0:
                             if i + 1 < len(lines):
                                 p1 = self._parse_line(lines[i + 1].strip())
-                                if p1 and p1[0] == "call" and p1[1].lower() in ("??mul16", "@mul16"):
+                                if p1 and p1[0] == "call" and p1[1].lower() in ("??mul16", "@mul16", "__mul16"):
                                     # Count shifts needed (log2)
                                     shift_count = 0
                                     temp = const_val
