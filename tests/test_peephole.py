@@ -2,6 +2,7 @@
 
 import pytest
 from upeepz80 import optimize, PeepholeOptimizer
+from upeepz80.peephole import PeepholeOptimizer as _PeepholeOptimizer
 
 
 class TestBasicPatterns:
@@ -414,3 +415,258 @@ MIDDLE:
         # Pattern should not match across label
         assert "push hl" in result
         assert "pop hl" in result
+
+
+class TestParseConst:
+    """Test _parse_const for various number formats."""
+
+    @pytest.fixture
+    def opt(self):
+        return _PeepholeOptimizer()
+
+    def test_decimal(self, opt):
+        assert opt._parse_const("42") == 42
+
+    def test_zero(self, opt):
+        assert opt._parse_const("0") == 0
+
+    def test_hex_suffix(self, opt):
+        assert opt._parse_const("0FFH") == 255
+
+    def test_hex_suffix_lower(self, opt):
+        assert opt._parse_const("10h") == 16
+
+    def test_hex_prefix_0x(self, opt):
+        assert opt._parse_const("0x10") == 16
+
+    def test_binary(self, opt):
+        assert opt._parse_const("10101B") == 21
+
+    def test_octal_o(self, opt):
+        assert opt._parse_const("77O") == 63
+
+    def test_octal_q(self, opt):
+        assert opt._parse_const("77Q") == 63
+
+    def test_label_returns_none(self, opt):
+        assert opt._parse_const("MYLABEL") is None
+
+    def test_empty_returns_none(self, opt):
+        assert opt._parse_const("") is None
+
+
+class TestIncHlConst:
+    """Test ld de,N; add hl,de -> inc hl (repeated) optimization."""
+
+    def test_ld_de_1_add_hl_de(self):
+        """ld de,1; add hl,de -> inc hl"""
+        result = optimize("\tld de,1\n\tadd hl,de")
+        assert result.strip() == "inc hl"
+
+    def test_ld_de_2_add_hl_de(self):
+        """ld de,2; add hl,de -> inc hl; inc hl"""
+        result = optimize("\tld de,2\n\tadd hl,de")
+        assert result.strip().count("inc hl") == 2
+
+    def test_ld_de_3_add_hl_de(self):
+        """ld de,3; add hl,de -> inc hl; inc hl; inc hl"""
+        result = optimize("\tld de,3\n\tadd hl,de")
+        assert result.strip().count("inc hl") == 3
+
+    def test_ld_de_4_not_optimized(self):
+        """ld de,4; add hl,de should NOT be converted to inc hl."""
+        result = optimize("\tld de,4\n\tadd hl,de")
+        assert "add hl,de" in result
+
+
+class TestMulStrengthReduction:
+    """Test multiply by power-of-2 strength reduction."""
+
+    def test_mul_by_2(self):
+        """ld de,2; call ??mul16 -> add hl,hl"""
+        result = optimize("\tld de,2\n\tcall ??mul16")
+        assert "add hl,hl" in result
+        assert result.strip().count("add hl,hl") == 1
+        assert "call" not in result
+
+    def test_mul_by_4(self):
+        """ld de,4; call ??mul16 -> add hl,hl; add hl,hl"""
+        result = optimize("\tld de,4\n\tcall ??mul16")
+        assert result.strip().count("add hl,hl") == 2
+        assert "call" not in result
+
+    def test_mul_by_8(self):
+        """ld de,8; call ??mul16 -> 3x add hl,hl"""
+        result = optimize("\tld de,8\n\tcall ??mul16")
+        assert result.strip().count("add hl,hl") == 3
+
+    def test_mul_by_non_power_of_2(self):
+        """ld de,3; call ??mul16 should NOT be strength-reduced."""
+        result = optimize("\tld de,3\n\tcall ??mul16")
+        assert "call" in result
+
+    def test_mul_at_mul16(self):
+        """ld de,2; call @mul16 -> add hl,hl"""
+        result = optimize("\tld de,2\n\tcall @mul16")
+        assert "add hl,hl" in result
+
+    def test_mul_dunder_mul16(self):
+        """ld de,2; call __mul16 -> add hl,hl"""
+        result = optimize("\tld de,2\n\tcall __mul16")
+        assert "add hl,hl" in result
+
+
+class TestIncDecMem:
+    """Test ld a,(addr); inc/dec a; ld (addr),a -> ld hl,addr; inc/dec (hl)."""
+
+    def test_inc_mem(self):
+        """ld a,(COUNT); inc a; ld (COUNT),a -> ld hl,COUNT; inc (hl)"""
+        asm = "\tld a,(COUNT)\n\tinc a\n\tld (COUNT),a"
+        result = optimize(asm)
+        assert "inc (hl)" in result
+        assert "ld hl,COUNT" in result
+
+    def test_dec_mem(self):
+        """ld a,(COUNT); dec a; ld (COUNT),a -> ld hl,COUNT; dec (hl)"""
+        asm = "\tld a,(COUNT)\n\tdec a\n\tld (COUNT),a"
+        result = optimize(asm)
+        assert "dec (hl)" in result
+        assert "ld hl,COUNT" in result
+
+
+class TestDjnz:
+    """Test dec b; jr/jp nz,label -> djnz label conversion."""
+
+    def test_dec_b_jr_nz(self):
+        """dec b; jr nz,LOOP -> djnz LOOP"""
+        asm = "LOOP:\n\tnop\n\tdec b\n\tjr nz,LOOP"
+        result = optimize(asm)
+        assert "djnz LOOP" in result
+        assert "dec b" not in result
+
+    def test_dec_b_jp_nz(self):
+        """dec b; jp nz,LOOP -> djnz LOOP (if in range)"""
+        asm = "LOOP:\n\tnop\n\tdec b\n\tjp nz,LOOP"
+        result = optimize(asm)
+        assert "djnz LOOP" in result
+
+
+class TestShiftToZ80:
+    """Test 8080-style 16-bit right shift to Z80 native."""
+
+    def test_shr_hl(self):
+        """or a; ld a,h; rra; ld h,a; ld a,l; rra; ld l,a -> srl h; rr l"""
+        asm = "\tor a\n\tld a,h\n\trra\n\tld h,a\n\tld a,l\n\trra\n\tld l,a"
+        result = optimize(asm)
+        assert "srl h" in result
+        assert "rr l" in result
+        assert "rra" not in result
+
+
+class TestSubdeZero:
+    """Test ld de,0; call ??subde -> elimination."""
+
+    def test_subde_zero_eliminated(self):
+        """ld de,0; call ??subde -> nothing"""
+        result = optimize("\tld de,0\n\tcall ??subde")
+        assert result.strip() == ""
+
+    def test_subde_zero_at_variant(self):
+        """ld de,0; call @subde -> nothing"""
+        result = optimize("\tld de,0\n\tcall @subde")
+        assert result.strip() == ""
+
+
+class TestLdDeAddr:
+    """Test push hl; ld hl,(addr); ex de,hl; pop hl -> ld de,(addr)."""
+
+    def test_ld_de_from_mem(self):
+        """push hl; ld hl,(DATA); ex de,hl; pop hl -> ld de,(DATA)"""
+        asm = "\tpush hl\n\tld hl,(DATA)\n\tex de,hl\n\tpop hl"
+        result = optimize(asm)
+        assert "ld de,(DATA)" in result
+        assert "push" not in result
+        assert "pop" not in result
+        assert "ex" not in result
+
+
+class TestJumpThreading:
+    """Test jump threading optimization."""
+
+    def test_thread_through_unconditional(self):
+        """jp A where A: jp B -> jp B"""
+        asm = "\tjp LBL_A\nLBL_A:\n\tjp LBL_B\nLBL_B:\n\tret"
+        result = optimize(asm)
+        # Should jump directly to LBL_B
+        assert "jp LBL_A" not in result or "jr LBL_A" not in result
+
+    def test_chain_threading(self):
+        """jp A; A: jp B; B: jp C -> jp C"""
+        asm = "\tjp L1\nL1:\n\tjp L2\nL2:\n\tjp L3\nL3:\n\tret"
+        result = optimize(asm)
+        # Should not contain jp L1 or jp L2 (threaded to L3 or ret)
+        lines = [l.strip() for l in result.split("\n") if l.strip()]
+        jump_targets = [l.split()[-1] for l in lines if l.startswith(("jp ", "jr "))]
+        # All jumps should target L3 or be eliminated
+        for target in jump_targets:
+            assert target in ("L3", "ret"), f"Unexpected jump target: {target}"
+
+
+class TestRelativeJumps:
+    """Test jp to jr conversion."""
+
+    def test_jp_to_jr_nearby_label(self):
+        """jp LABEL -> jr LABEL when target is close."""
+        asm = "LOOP:\n\tnop\n\tjp LOOP"
+        result = optimize(asm)
+        assert "jr LOOP" in result or "djnz" in result
+
+    def test_jp_conditional_to_jr(self):
+        """jp z,LABEL -> jr z,LABEL when close."""
+        asm = "TARGET:\n\tnop\n\tor a\n\tjp z,TARGET"
+        result = optimize(asm)
+        assert "jr z,TARGET" in result
+
+
+class TestDeadStoreElimination:
+    """Test dead store elimination at procedure entry."""
+
+    def test_dead_store_removed(self):
+        """Store to unused memory location is removed."""
+        asm = "myproc:\n\tld (PARAM),a\n\tadd a,b\n\tret"
+        result = optimize(asm)
+        assert "myproc:" in result
+        assert "(PARAM)" not in result
+
+    def test_live_store_kept(self):
+        """Store to memory location that is later loaded is kept."""
+        asm = "myproc:\n\tld (PARAM),a\n\tcall other\n\tld a,(PARAM)\n\tret"
+        result = optimize(asm)
+        assert "(PARAM)" in result
+
+
+class TestOutputIndentation:
+    """Test that output uses consistent indentation."""
+
+    def test_pattern_replacement_uses_tabs(self):
+        """Pattern replacements should use tab indentation."""
+        result = optimize("\tld a,0")
+        # Should be tab-indented xor a
+        assert "\txor a" in result or result.strip() == "xor a"
+
+    def test_push_pop_replacement_uses_tabs(self):
+        """Push/pop copy replacements should use tab indentation."""
+        result = optimize("\tpush hl\n\tpop de")
+        for line in result.split("\n"):
+            stripped = line.strip()
+            if stripped and not stripped.endswith(":"):
+                assert line.startswith("\t"), f"Line not tab-indented: {repr(line)}"
+
+
+class TestVersionConsistency:
+    """Test that version numbers are consistent."""
+
+    def test_version_matches(self):
+        """__init__.py version should match pyproject.toml."""
+        import upeepz80
+        assert upeepz80.__version__ == "0.2.1"

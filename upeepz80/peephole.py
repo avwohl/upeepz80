@@ -80,13 +80,7 @@ class PeepholeOptimizer:
                 replacement=None,  # Keep first only
                 condition=lambda ops: ops[0][1].lower() == ops[1][1].lower(),
             ),
-            # ld a,a -> (nothing, useless)
-            PeepholePattern(
-                name="ld_a_a",
-                pattern=[("ld", "a,a")],
-                replacement=[],
-            ),
-            # ld b,b, ld c,c, etc. -> (nothing)
+            # ld r,r -> (nothing)
             PeepholePattern(
                 name="ld_r_r",
                 pattern=[("ld", None)],
@@ -234,7 +228,6 @@ class PeepholeOptimizer:
                 name="tail_call",
                 pattern=[("call", None), ("ret", "")],
                 replacement=None,  # Replaced specially
-                condition=lambda ops: True,
             ),
             # ret; ret -> ret (unreachable code)
             PeepholePattern(
@@ -358,13 +351,11 @@ class PeepholeOptimizer:
                 name="useless_extend_before_sub",
                 pattern=[("ld", "l,a"), ("ld", "h,0"), ("sub", None)],
                 replacement=None,  # Keep last only
-                condition=lambda ops: True,  # Always apply
             ),
             PeepholePattern(
                 name="useless_extend_before_cp",
                 pattern=[("ld", "l,a"), ("ld", "h,0"), ("cp", None)],
                 replacement=None,  # Keep last only
-                condition=lambda ops: True,
             ),
             # Redundant byte extension: ld l,a; ld h,0; ld l,a; ld h,0 -> ld l,a; ld h,0
             PeepholePattern(
@@ -420,7 +411,7 @@ class PeepholeOptimizer:
                 condition=lambda ops: ops[1][1].startswith("(") and ops[1][1].lower().endswith("),a"),
             ),
             # ld a,l; ld h,0; ld (addr),a -> ld a,l; ld (addr),a
-            # mvi h,0 is useless before store
+            # ld h,0 is useless before store
             PeepholePattern(
                 name="ld_al_h0_sta",
                 pattern=[("ld", "a,l"), ("ld", "h,0"), ("ld", None)],
@@ -518,25 +509,18 @@ class PeepholeOptimizer:
         passes = 0
         max_passes = 10
 
-        # Phase 1: Apply Z80 patterns
+        # Phase 1: Apply pattern-based and Z80-specific optimizations
         while changed and passes < max_passes:
             changed = False
             passes += 1
             lines, did_change = self._optimize_pass(lines)
             if did_change:
                 changed = True
-
-        # Phase 2: Z80-specific optimizations (inline patterns)
-        changed = True
-        passes = 0
-        while changed and passes < max_passes:
-            changed = False
-            passes += 1
             lines, did_change = self._optimize_z80_pass(lines)
             if did_change:
                 changed = True
 
-        # Phase 3: Jump threading
+        # Phase 2: Jump threading
         changed = True
         passes = 0
         while changed and passes < max_passes:
@@ -546,13 +530,14 @@ class PeepholeOptimizer:
             if did_change:
                 changed = True
 
-        # Phase 4: Convert long jumps to relative jumps where possible
+        # Phase 3: Convert long jumps to relative jumps where possible
         lines = self._convert_to_relative_jumps(lines)
 
-        # Phase 5: Apply Z80-specific patterns again (for DJNZ after JR conversion)
+        # Phase 4: Apply optimizations again (for DJNZ after JR conversion)
+        lines, _ = self._optimize_pass(lines)
         lines, _ = self._optimize_z80_pass(lines)
 
-        # Phase 6: Dead store elimination at procedure entry
+        # Phase 5: Dead store elimination at procedure entry
         lines, _ = self._dead_store_elimination(lines)
 
         return "\n".join(lines)
@@ -591,7 +576,7 @@ class PeepholeOptimizer:
                         j += 1
                         continue
                     # Check if this is a label line
-                    if ":" in next_line and not next_line.startswith("\t"):
+                    if self._is_label_line(lines[j]):
                         label = next_line.split(":")[0].strip()
                         if label == target:
                             # JP to next label - remove the JP
@@ -623,7 +608,7 @@ class PeepholeOptimizer:
                     parsed = self._parse_line(lines[j])
                     if parsed is None:
                         # Check for label - breaks pattern matching
-                        if instr_line and ':' in instr_line and not instr_line.startswith(';'):
+                        if self._is_label_line(lines[j]):
                             valid = False
                             break
                         skip_indices.append(j - i)
@@ -656,9 +641,9 @@ class PeepholeOptimizer:
                     if pattern.replacement is not None:
                         for opcode, operands in pattern.replacement:
                             if operands:
-                                result.append(f"    {opcode} {operands}")
+                                result.append(f"\t{opcode} {operands}")
                             else:
-                                result.append(f"    {opcode}")
+                                result.append(f"\t{opcode}")
                     elif pattern.name.startswith("cond_uncond"):
                         # Keep second instruction only
                         result.append(lines[instruction_lines[-1]])
@@ -671,7 +656,7 @@ class PeepholeOptimizer:
                     elif pattern.name == "tail_call":
                         # call x; ret -> jp x
                         call_target = instrs[0][1]
-                        result.append(f"    jp {call_target}")
+                        result.append(f"\tjp {call_target}")
                     elif pattern.name == "push_shld_pop":
                         # Keep middle only
                         result.append(lines[instruction_lines[1]])
@@ -710,25 +695,15 @@ class PeepholeOptimizer:
         # Build label_lines map for range checking
         label_lines: dict[str, int] = {}
         for line_num, line in enumerate(lines):
-            stripped = line.strip()
-            if ":" in stripped and not stripped.startswith("\t"):
-                label = stripped.split(":")[0].strip()
+            if self._is_label_line(line):
+                label = line.strip().split(":")[0].strip()
                 label_lines[label] = line_num
 
         while i < len(lines):
-            line = lines[i].strip()
-            parsed = self._parse_line(line)
+            parsed = self._parse_line(lines[i])
 
             if parsed:
                 opcode, operands = parsed
-
-                # ld a,0 -> xor a (1 byte vs 2)
-                if opcode == "ld" and operands.lower() == "a,0":
-                    result.append("\txor a")
-                    changed = True
-                    self.stats["xor_a"] = self.stats.get("xor_a", 0) + 1
-                    i += 1
-                    continue
 
                 # ld de,1/2/3; add hl,de -> inc hl (repeated)
                 # Saves 3/2/1 bytes respectively
@@ -794,45 +769,6 @@ class PeepholeOptimizer:
                             i += 3
                             continue
 
-                # ex de,hl; ex de,hl -> (nothing)
-                if opcode == "ex" and operands.lower() == "de,hl" and i + 1 < len(lines):
-                    next_parsed = self._parse_line(lines[i + 1].strip())
-                    if next_parsed and next_parsed[0] == "ex" and next_parsed[1].lower() == "de,hl":
-                        changed = True
-                        self.stats["double_ex"] = self.stats.get("double_ex", 0) + 1
-                        i += 2
-                        continue
-
-                # inc hl; dec hl -> (nothing)
-                if opcode == "inc" and operands.lower() == "hl" and i + 1 < len(lines):
-                    next_parsed = self._parse_line(lines[i + 1].strip())
-                    if next_parsed and next_parsed[0] == "dec" and next_parsed[1].lower() == "hl":
-                        changed = True
-                        self.stats["inc_dec_hl"] = self.stats.get("inc_dec_hl", 0) + 1
-                        i += 2
-                        continue
-
-                # dec hl; inc hl -> (nothing)
-                if opcode == "dec" and operands.lower() == "hl" and i + 1 < len(lines):
-                    next_parsed = self._parse_line(lines[i + 1].strip())
-                    if next_parsed and next_parsed[0] == "inc" and next_parsed[1].lower() == "hl":
-                        changed = True
-                        self.stats["dec_inc_hl"] = self.stats.get("dec_inc_hl", 0) + 1
-                        i += 2
-                        continue
-
-                # ld (addr),hl; ld hl,(addr) -> ld (addr),hl (same address)
-                if opcode == "ld" and operands.startswith("(") and operands.lower().endswith("),hl"):
-                    addr = operands[1:-4]
-                    if i + 1 < len(lines):
-                        next_parsed = self._parse_line(lines[i + 1].strip())
-                        if next_parsed and next_parsed[0] == "ld" and next_parsed[1].lower() == f"hl,({addr.lower()})":
-                            result.append(lines[i])
-                            changed = True
-                            self.stats["ld_hl_same"] = self.stats.get("ld_hl_same", 0) + 1
-                            i += 2
-                            continue
-
                 # dec b; jr/jp nz,label -> djnz label
                 if opcode == "dec" and operands.lower() == "b" and i + 1 < len(lines):
                     next_parsed = self._parse_line(lines[i + 1].strip())
@@ -895,18 +831,6 @@ class PeepholeOptimizer:
                         changed = True
                         self.stats["ld_de_addr"] = self.stats.get("ld_de_addr", 0) + 1
                         i += 4
-                        continue
-
-                # push af; ld (addr),a; pop af -> ld (addr),a
-                if opcode == "push" and operands.lower() == "af" and i + 2 < len(lines):
-                    p1 = self._parse_line(lines[i + 1].strip())
-                    p2 = self._parse_line(lines[i + 2].strip())
-                    if (p1 and p1[0] == "ld" and p1[1].startswith("(") and p1[1].lower().endswith("),a") and
-                        p2 and p2[0] == "pop" and p2[1].lower() == "af"):
-                        result.append(lines[i + 1])  # Keep only ld (addr),a
-                        changed = True
-                        self.stats["push_sta_pop"] = self.stats.get("push_sta_pop", 0) + 1
-                        i += 3
                         continue
 
                 # ld hl,const; ld r,l -> ld r,const
@@ -982,15 +906,14 @@ class PeepholeOptimizer:
         # First pass: find all label positions
         label_lines: dict[str, int] = {}
         for i, line in enumerate(lines):
-            stripped = line.strip()
-            if ":" in stripped and not stripped.startswith("\t"):
-                label = stripped.split(":")[0].strip()
+            if self._is_label_line(line):
+                label = line.strip().split(":")[0].strip()
                 label_lines[label] = i
 
         # Second pass: convert jumps where target is close
         result: list[str] = []
         for i, line in enumerate(lines):
-            parsed = self._parse_line(line.strip())
+            parsed = self._parse_line(line)
 
             if parsed:
                 opcode, operands = parsed
@@ -1047,16 +970,15 @@ class PeepholeOptimizer:
         # Build map of label -> (line index, first instruction after label)
         label_info: dict[str, tuple[int, str | None]] = {}
         for i, line in enumerate(lines):
-            stripped = line.strip()
-            if ":" in stripped and not stripped.startswith("\t"):
-                label = stripped.split(":")[0].strip()
+            if self._is_label_line(line):
+                label = line.strip().split(":")[0].strip()
                 # Find first instruction after this label
                 first_instr = None
                 for j in range(i + 1, len(lines)):
                     next_line = lines[j].strip()
                     if not next_line or next_line.startswith(";"):
                         continue
-                    if ":" in next_line and not next_line.startswith("\t"):
+                    if self._is_label_line(lines[j]):
                         break
                     first_instr = next_line
                     break
@@ -1091,8 +1013,7 @@ class PeepholeOptimizer:
         # Rewrite jumps to use final destinations
         result: list[str] = []
         for i, line in enumerate(lines):
-            stripped = line.strip()
-            parsed = self._parse_line(stripped)
+            parsed = self._parse_line(line)
 
             if parsed and parsed[0] in ("jp", "jr", "call", "djnz"):
                 operands = parsed[1]
@@ -1124,7 +1045,7 @@ class PeepholeOptimizer:
                 target = parsed[1].strip()
                 if target in label_target:
                     new_target = label_target[target]
-                    result.append(f"\tdw\t{new_target}")
+                    result.append(f"\tdw {new_target}")
                     changed = True
                     self.stats["dw_thread"] = self.stats.get("dw_thread", 0) + 1
                     label_refs[new_target] = label_refs.get(new_target, 0) + 1
@@ -1134,9 +1055,8 @@ class PeepholeOptimizer:
                         label_refs[target] += 1
             else:
                 result.append(line)
-                if ":" in stripped and not stripped.startswith("\t"):
-                    pass
-                else:
+                if not self._is_label_line(line):
+                    stripped = line.strip()
                     for label in label_info:
                         if label in stripped:
                             label_refs[label] = label_refs.get(label, 0) + 1
@@ -1148,7 +1068,7 @@ class PeepholeOptimizer:
             line = result[i]
             stripped = line.strip()
 
-            if ":" in stripped and not stripped.startswith("\t"):
+            if self._is_label_line(line):
                 label = stripped.split(":")[0].strip()
 
                 if label in label_refs and label_refs[label] == 0 and label in label_target:
@@ -1158,9 +1078,9 @@ class PeepholeOptimizer:
                         prev = final_result[j].strip()
                         if not prev or prev.startswith(";"):
                             continue
-                        if ":" in prev and not prev.startswith("\t"):
+                        if self._is_label_line(final_result[j]):
                             break
-                        prev_parsed = self._parse_line(prev)
+                        prev_parsed = self._parse_line(final_result[j])
                         if prev_parsed:
                             if prev_parsed[0] in ("jp", "jr", "ret") and "," not in prev_parsed[1]:
                                 can_fallthrough = False
@@ -1204,11 +1124,10 @@ class PeepholeOptimizer:
             stripped = line.strip()
 
             # Look for procedure entry (label followed by ld (addr),a)
-            if ":" in stripped and not stripped.startswith("\t") and not stripped.startswith(";"):
+            if self._is_label_line(line):
                 label = stripped.split(":")[0].strip()
                 if i + 1 < len(lines):
-                    next_stripped = lines[i + 1].strip()
-                    parsed = self._parse_line(next_stripped)
+                    parsed = self._parse_line(lines[i + 1])
                     # Check for ld (addr),a pattern
                     if (parsed and parsed[0] == "ld" and
                         parsed[1].startswith("(") and parsed[1].lower().endswith("),a")):
@@ -1217,13 +1136,9 @@ class PeepholeOptimizer:
                         # (non-nested label that doesn't start with @ or ?? and isn't
                         # preceded by whitespace)
                         proc_end = i + 2
-                        proc_label = label
                         while proc_end < len(lines):
-                            end_stripped = lines[proc_end].strip()
-                            if (":" in end_stripped and
-                                not end_stripped.startswith("\t") and
-                                not end_stripped.startswith(";")):
-                                lbl = end_stripped.split(":")[0].strip()
+                            if self._is_label_line(lines[proc_end]):
+                                lbl = lines[proc_end].strip().split(":")[0].strip()
                                 # Stop at next top-level procedure (not starting with @ or ??)
                                 # Nested procedures start with @ and internal labels with ??
                                 if not lbl.startswith("@") and not lbl.startswith("??"):
@@ -1254,15 +1169,22 @@ class PeepholeOptimizer:
 
         return result, changed
 
+    def _is_label_line(self, line: str) -> bool:
+        """Check if a raw (unstripped) line is a label definition."""
+        return (":" in line and
+                not line.startswith(("\t", " ")) and
+                not line.startswith(";"))
+
     def _parse_line(self, line: str) -> tuple[str, str] | None:
         """Parse a Z80 assembly line into (opcode, operands)."""
+        is_indented = line != line.lstrip()
         line = line.strip()
 
         if not line or line.startswith(";"):
             return None
 
-        # Handle labels with potential instruction after
-        if ":" in line and not line.startswith("\t"):
+        # Handle labels (at column 0) with potential instruction after
+        if ":" in line and not is_indented:
             parts = line.split(":", 1)
             if len(parts) > 1 and parts[1].strip():
                 line = parts[1].strip()
