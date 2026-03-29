@@ -8,7 +8,7 @@ For compilers that generate 8080 mnemonics (MOV, MVI, etc.),
 use upeep80 instead.
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 __author__ = "upeepz80 project"
 
 from .peephole import (
