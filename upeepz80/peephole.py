@@ -834,6 +834,10 @@ class PeepholeOptimizer:
                         continue
 
                 # ld hl,const; ld r,l -> ld r,const
+                # Only safe when H is dead after the pair — the transform
+                # drops the implicit H set from ``ld hl,const``. Scan the
+                # next few instructions: if any reads H before something
+                # clobbers it, leave the pair alone.
                 if opcode == "ld" and operands.lower().startswith("hl,") and not operands.lower().startswith("hl,("):
                     const_val = operands[3:]
                     if i + 1 < len(lines):
@@ -841,11 +845,12 @@ class PeepholeOptimizer:
                         if p1 and p1[0] == "ld" and p1[1].lower().endswith(",l"):
                             dest_reg = p1[1][:-2]  # Get destination register
                             if dest_reg.lower() in ("a", "b", "c", "d", "e"):
-                                result.append(f"\tld {dest_reg.lower()},{const_val}")
-                                changed = True
-                                self.stats["ld_via_hl"] = self.stats.get("ld_via_hl", 0) + 1
-                                i += 2
-                                continue
+                                if self._h_dead_after(lines, i + 2):
+                                    result.append(f"\tld {dest_reg.lower()},{const_val}")
+                                    changed = True
+                                    self.stats["ld_via_hl"] = self.stats.get("ld_via_hl", 0) + 1
+                                    i += 2
+                                    continue
 
                 # pop hl; push hl; ld hl,x -> ld hl,x
                 if opcode == "pop" and operands.lower() == "hl" and i + 2 < len(lines):
@@ -1174,6 +1179,65 @@ class PeepholeOptimizer:
         return (":" in line and
                 not line.startswith(("\t", " ")) and
                 not line.startswith(";"))
+
+    def _h_dead_after(self, lines: list, start: int, lookahead: int = 8) -> bool:
+        """Return True if register H is provably dead from ``lines[start]``.
+
+        Conservative: scan up to ``lookahead`` instructions; if any reads H
+        (directly or via instructions that consume HL as a 16-bit value)
+        before anything overwrites it, treat H as live. A branch / call /
+        ret / label inside the window also makes us conservative — bail.
+
+        Used to gate the ``ld hl,const; ld r,l -> ld r,const`` rewrite,
+        which silently drops the H-load and breaks any later ``ld a,h``,
+        ``add hl,…`` etc.
+        """
+        # Instructions that READ H (or HL):
+        # - ld r,h  (r ∈ a,b,c,d,e,l)
+        # - or h / and h / xor h / cp h / add a,h / adc a,h / sub h / sbc a,h
+        # - any instruction whose operand mentions H not as a pure dest
+        # Instructions that WRITE H (clear-before-read => H dead before):
+        # - ld h,*  / pop hl / ld hl,(addr) / ld hl,nn (any ld hl,…)
+        # 16-bit ops that read HL (and thus H): add hl,*, adc hl,*, sbc hl,*,
+        #   inc hl, dec hl, push hl, ex de,hl, ex (sp),hl, ldir, etc.
+        for k in range(start, min(start + lookahead, len(lines))):
+            ln = lines[k].strip()
+            if not ln or ln.startswith(";"):
+                continue
+            # Label or directive: bail conservative
+            if ":" in ln and not lines[k].startswith(("\t", " ")):
+                return False
+            p = self._parse_line(ln)
+            if p is None:
+                return False
+            op, ops = p[0], (p[1] or "").lower()
+            # H-killing writes
+            if op == "ld" and ops.startswith("h,"):
+                return True
+            if op == "ld" and ops.startswith("hl,"):
+                return True
+            if op == "pop" and ops == "hl":
+                return True
+            # H-reading reads
+            if op in {"or", "and", "xor", "cp", "sub", "inc", "dec"} and ops == "h":
+                return False
+            if op in {"add", "adc", "sbc"} and ops in {"a,h", "hl,bc", "hl,de", "hl,hl", "hl,sp"}:
+                return False
+            if op == "ld" and ops.endswith(",h"):
+                return False
+            if op in {"push", "ex"} and ops.endswith("hl") or ops in {"hl", "de,hl", "(sp),hl"}:
+                return False
+            if op in {"inc", "dec"} and ops == "hl":
+                return False
+            if op in {"call", "ret", "jp", "jr", "djnz"}:
+                # Branches and calls: H may be expected by callee or live
+                # across branches — bail conservative.
+                return False
+            if op in {"ldir", "lddr", "ldi", "ldd"}:
+                return False
+            # Other instructions don't touch H — keep scanning
+        # Reached the lookahead without seeing H read — assume dead.
+        return True
 
     def _parse_line(self, line: str) -> tuple[str, str] | None:
         """Parse a Z80 assembly line into (opcode, operands)."""
