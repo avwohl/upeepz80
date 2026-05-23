@@ -667,6 +667,7 @@ class TestVersionConsistency:
     """Test that version numbers are consistent."""
 
     def test_version_matches(self):
-        """__init__.py version should match pyproject.toml."""
+        """__init__.py version should match installed package metadata (pyproject.toml)."""
         import upeepz80
-        assert upeepz80.__version__ == "0.2.2"
+        from importlib.metadata import version
+        assert upeepz80.__version__ == version("upeepz80")
