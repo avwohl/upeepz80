@@ -150,7 +150,7 @@ Benchmarks on typical compiler workloads:
 
 ## Contributing
 
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Contributions are welcome. Open an issue or a pull request.
 
 ## License
 
