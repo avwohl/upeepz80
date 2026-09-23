@@ -644,6 +644,41 @@ class TestDeadStoreElimination:
         result = optimize(asm)
         assert "(PARAM)" in result
 
+    def test_store_after_internal_label_is_kept(self):
+        """A `??' label is a join point mid-expression, not a procedure entry.
+
+        `var = (a = b)' in PL/M-80 compiles to the two arms of a comparison
+        meeting at a generated label, with the store to var right after it.
+        Treating that label as a procedure entry threw the assignment away.
+        """
+        asm = ("P3:\n\tld a,(VA)\n\tcp b\n\tjr z,??T\n\txor a\n\tjr ??C\n"
+               "??T:\n\tld a,0ffh\n??C:\n\tld (S),a\n\tret\n")
+        result = optimize(asm)
+        assert "ld\t(S),a" in result or "ld (S),a" in result, result
+
+    def test_store_read_by_a_later_procedure_is_kept(self):
+        """Liveness is a property of the module, not of one procedure.
+
+        Scanning only to the end of the procedure is right for a parameter
+        slot, which nothing else can name, and wrong for a variable at module
+        scope that a procedure declared further down reads.
+        """
+        asm = "P5:\n\tld (V),a\n\tret\nP6:\n\tld a,(V)\n\tret\n"
+        result = optimize(asm)
+        assert "(V),a" in result, result
+
+    def test_exported_store_is_kept(self):
+        """A location the module exports may be read by another module."""
+        asm = "\tpublic PARAM\nmyproc:\n\tld (PARAM),a\n\tadd a,b\n\tret"
+        result = optimize(asm)
+        assert "(PARAM)" in result, result
+
+    def test_store_whose_address_is_taken_is_kept(self):
+        """`ld hl,PARAM' hands the location to code this pass cannot see."""
+        asm = "myproc:\n\tld (PARAM),a\n\tld hl,PARAM\n\tcall other\n\tret"
+        result = optimize(asm)
+        assert "(PARAM)" in result, result
+
 
 class TestOutputIndentation:
     """Test that output uses consistent indentation."""

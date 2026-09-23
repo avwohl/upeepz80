@@ -1119,6 +1119,22 @@ class PeepholeOptimizer:
 
         Pattern: A procedure stores a register parameter to memory at entry,
         but uses the register directly without ever loading from that memory.
+
+        Two things make a store here safe to drop, and both are checked:
+
+        * The label really is a procedure entry.  A compiler-internal label
+          (``??CMP0003:`` and the like) is a branch target in the middle of an
+          expression, and the store that follows it is an ordinary assignment
+          which happens to land right after a join point - most often
+          ``var = (a = b)``, where the two arms of the comparison meet at the
+          label before the result is stored.
+
+        * Nothing else in the module reads the location.  Scanning only to the
+          end of the procedure is enough for a parameter slot, which no one
+          else can name, and wrong for anything at module scope: another
+          procedure, declared later, reads it perfectly legally.  A location
+          whose address is taken, or which the module exports, is off limits
+          for the same reason.
         """
         result: list[str] = []
         changed = False
@@ -1129,7 +1145,7 @@ class PeepholeOptimizer:
             stripped = line.strip()
 
             # Look for procedure entry (label followed by ld (addr),a)
-            if self._is_label_line(line):
+            if self._is_label_line(line) and not stripped.startswith("??"):
                 label = stripped.split(":")[0].strip()
                 if i + 1 < len(lines):
                     parsed = self._parse_line(lines[i + 1])
@@ -1150,17 +1166,10 @@ class PeepholeOptimizer:
                                     break
                             proc_end += 1
 
-                        # Check if addr is ever loaded within this procedure
-                        # (including nested procedures that may access enclosing params)
-                        addr_loaded = False
-                        for j in range(i + 2, proc_end):
-                            check_line = lines[j].strip()
-                            if f"({addr})" in check_line.lower() or f"({addr.lower()})" in check_line.lower():
-                                p = self._parse_line(check_line)
-                                if p and p[0] == "ld":
-                                    if not p[1].startswith("("):
-                                        addr_loaded = True
-                                        break
+                        # Check whether anything anywhere in the module reads
+                        # the location, exports it, or takes its address.  The
+                        # store is only dead if nothing does.
+                        addr_loaded = self._addr_is_live(lines, addr, i + 1)
 
                         if not addr_loaded:
                             result.append(line)  # Keep the label
@@ -1173,6 +1182,42 @@ class PeepholeOptimizer:
             i += 1
 
         return result, changed
+
+    def _addr_is_live(self, lines: list[str], addr: str, store_index: int) -> bool:
+        """Does anything outside ``lines[store_index]`` need ``addr``?
+
+        Conservative by construction: a name that is read, exported, or used
+        anywhere as a value rather than as a store destination counts as live.
+        """
+        target = addr.strip().lower()
+        if not target:
+            return True
+        paren = "(" + target + ")"
+        for j, raw in enumerate(lines):
+            if j == store_index:
+                continue
+            text = raw.strip().lower()
+            if not text or text.startswith(";"):
+                continue
+            if target not in text:
+                continue
+            parsed = self._parse_line(text)
+            if not parsed:
+                # A label definition or a directive. `public NAME' hands the
+                # name to another module, which may read it.
+                if re.match(r"^(public|global|extrn|external)\b", text):
+                    return True
+                continue
+            op, operand = parsed[0], parsed[1] if len(parsed) > 1 else ""
+            if op in ("public", "global", "extrn", "external"):
+                return True
+            if op == "ld" and operand.startswith(paren):
+                # A store to it. Not a read.
+                continue
+            # Anything else that names it - a load, an address taken with
+            # `ld hl,NAME', a `dw NAME' in a table - keeps it alive.
+            return True
+        return False
 
     def _is_label_line(self, line: str) -> bool:
         """Check if a raw (unstripped) line is a label definition."""
