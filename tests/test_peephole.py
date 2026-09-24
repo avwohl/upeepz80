@@ -4,19 +4,25 @@ import pytest
 from upeepz80 import optimize, PeepholeOptimizer
 from upeepz80.peephole import PeepholeOptimizer as _PeepholeOptimizer
 
+# Code after a fragment, overwriting what its rewrite changes: the optimizer
+# only rewrites where the registers and flags it changes are dead, and the end
+# of the text, like a ret, counts as reading everything.
+KILL_DE_FLAGS = "\n\tld de,0\n\tcp b"
+KILL_ALL_BUT_HL = "\n\tld a,1\n\tld bc,0\n\tld de,0\n\tcp b"
+
 
 class TestBasicPatterns:
     """Test basic peephole optimization patterns."""
 
     def test_ld_a_0_to_xor_a(self):
-        """ld a,0 -> xor a"""
-        result = optimize("    ld a,0")
-        assert result.strip() == "xor a"
+        """ld a,0 -> xor a, where the flags xor a sets are overwritten"""
+        result = optimize("    ld a,0\n    cp b")
+        assert result.split() == ["xor", "a", "cp", "b"]
 
     def test_cp_0_to_or_a(self):
-        """cp 0 -> or a"""
-        result = optimize("    cp 0")
-        assert result.strip() == "or a"
+        """cp 0 -> or a, where P/V and N (which differ) are not read"""
+        result = optimize("    cp 0\n    sbc a,a")
+        assert result.split() == ["or", "a", "sbc", "a,a"]
 
     def test_push_pop_same_eliminated(self):
         """push rr; pop rr -> nothing"""
@@ -59,13 +65,13 @@ class TestIncDecPatterns:
 
     def test_inc_dec_a_eliminated(self):
         """inc a; dec a -> nothing"""
-        result = optimize("    inc a\n    dec a")
-        assert result.strip() == ""
+        result = optimize("    inc a\n    dec a\n    cp b")
+        assert result.strip() == "cp b"
 
     def test_dec_inc_a_eliminated(self):
         """dec a; inc a -> nothing"""
-        result = optimize("    dec a\n    inc a")
-        assert result.strip() == ""
+        result = optimize("    dec a\n    inc a\n    cp b")
+        assert result.strip() == "cp b"
 
     def test_inc_dec_hl_eliminated(self):
         """inc hl; dec hl -> nothing"""
@@ -118,13 +124,13 @@ class TestDoubleInstructionPatterns:
 
     def test_double_ccf(self):
         """ccf; ccf -> nothing"""
-        result = optimize("    ccf\n    ccf")
-        assert result.strip() == ""
+        result = optimize("    ccf\n    ccf\n    cp b")
+        assert result.strip() == "cp b"
 
     def test_double_cpl(self):
         """cpl; cpl -> nothing"""
-        result = optimize("    cpl\n    cpl")
-        assert result.strip() == ""
+        result = optimize("    cpl\n    cpl\n    cp b")
+        assert result.strip() == "cp b"
 
     def test_double_ret(self):
         """ret; ret -> ret"""
@@ -191,23 +197,23 @@ class TestLoadOptimizations:
 
     def test_ld_a_hl_ld_e_a(self):
         """ld a,(hl); ld e,a -> ld e,(hl)"""
-        result = optimize("    ld a,(hl)\n    ld e,a")
-        assert result.strip() == "ld e,(hl)"
+        result = optimize("    ld a,(hl)\n    ld e,a\n    ld a,c")
+        assert result.split("\n")[0].strip() == "ld e,(hl)"
 
     def test_ld_a_hl_ld_d_a(self):
         """ld a,(hl); ld d,a -> ld d,(hl)"""
-        result = optimize("    ld a,(hl)\n    ld d,a")
-        assert result.strip() == "ld d,(hl)"
+        result = optimize("    ld a,(hl)\n    ld d,a\n    ld a,c")
+        assert result.split("\n")[0].strip() == "ld d,(hl)"
 
     def test_ld_a_hl_ld_c_a(self):
         """ld a,(hl); ld c,a -> ld c,(hl)"""
-        result = optimize("    ld a,(hl)\n    ld c,a")
-        assert result.strip() == "ld c,(hl)"
+        result = optimize("    ld a,(hl)\n    ld c,a\n    ld a,c")
+        assert result.split("\n")[0].strip() == "ld c,(hl)"
 
     def test_ld_a_hl_ld_b_a(self):
         """ld a,(hl); ld b,a -> ld b,(hl)"""
-        result = optimize("    ld a,(hl)\n    ld b,a")
-        assert result.strip() == "ld b,(hl)"
+        result = optimize("    ld a,(hl)\n    ld b,a\n    ld a,c")
+        assert result.split("\n")[0].strip() == "ld b,(hl)"
 
     def test_ld_ba_ab_redundant(self):
         """ld b,a; ld a,b -> ld b,a"""
@@ -240,8 +246,8 @@ class TestBitwiseOptimizations:
 
     def test_and_ff_to_or_a(self):
         """and 0ffh -> or a"""
-        result = optimize("    and 0ffh")
-        assert result.strip() == "or a"
+        result = optimize("    and 0ffh\n    cp b")
+        assert result.split("\n")[0].strip() == "or a"
 
     def test_or_0_to_or_a(self):
         """or 0 -> or a"""
@@ -276,13 +282,13 @@ class TestConstantOptimizations:
 
     def test_ld_hl_0_test_to_xor_a(self):
         """ld hl,0; ld a,l; or h -> xor a"""
-        result = optimize("    ld hl,0\n    ld a,l\n    or h")
-        assert "xor a" in result
+        result = optimize("    ld hl,0\n    ld a,l\n    or h\n    ld hl,5")
+        assert result.split("\n")[0].strip() == "xor a"
 
     def test_ld_hl_1_ld_c_l(self):
         """ld hl,1; ld c,l -> ld c,1"""
-        result = optimize("    ld hl,1\n    ld c,l")
-        assert result.strip() == "ld c,1"
+        result = optimize("    ld hl,1\n    ld c,l\n    ld hl,5")
+        assert result.split("\n")[0].strip() == "ld c,1"
 
 
 class TestCaseInsensitivity:
@@ -290,12 +296,12 @@ class TestCaseInsensitivity:
 
     def test_uppercase_input(self):
         """Uppercase input should still be optimized."""
-        result = optimize("    LD A,0")
+        result = optimize("    LD A,0\n    CP B")
         assert "xor" in result.lower()
 
     def test_mixed_case_input(self):
         """Mixed case input should still be optimized."""
-        result = optimize("    Ld A,0")
+        result = optimize("    Ld A,0\n    Cp B")
         assert "xor" in result.lower()
 
     def test_uppercase_registers(self):
@@ -334,14 +340,14 @@ class TestOptimizerStats:
     def test_stats_tracked(self):
         """Optimizer should track statistics."""
         opt = PeepholeOptimizer()
-        opt.optimize("    ld a,0\n    cp 0")
+        opt.optimize("    ld a,0\n    cp 0\n    cp b")
         assert opt.stats.get("xor_a", 0) > 0 or opt.stats.get("zero_a_ld", 0) > 0
 
     def test_stats_accumulate(self):
         """Stats should accumulate across optimizations."""
         opt = PeepholeOptimizer()
-        opt.optimize("    ld a,0")
-        opt.optimize("    ld a,0")
+        opt.optimize("    ld a,0\n    cp b")
+        opt.optimize("    ld a,0\n    cp b")
         total = sum(opt.stats.values())
         assert total >= 2
 
@@ -379,6 +385,7 @@ class TestComplexSequences:
         """Multiple optimizations should apply."""
         asm = """
     ld a,0
+    cp b
     push hl
     pop de
     ret
@@ -460,22 +467,22 @@ class TestIncHlConst:
 
     def test_ld_de_1_add_hl_de(self):
         """ld de,1; add hl,de -> inc hl"""
-        result = optimize("\tld de,1\n\tadd hl,de")
-        assert result.strip() == "inc hl"
+        result = optimize("\tld de,1\n\tadd hl,de" + KILL_DE_FLAGS)
+        assert result.split("\n")[0].strip() == "inc hl"
 
     def test_ld_de_2_add_hl_de(self):
         """ld de,2; add hl,de -> inc hl; inc hl"""
-        result = optimize("\tld de,2\n\tadd hl,de")
+        result = optimize("\tld de,2\n\tadd hl,de" + KILL_DE_FLAGS)
         assert result.strip().count("inc hl") == 2
 
     def test_ld_de_3_add_hl_de(self):
         """ld de,3; add hl,de -> inc hl; inc hl; inc hl"""
-        result = optimize("\tld de,3\n\tadd hl,de")
+        result = optimize("\tld de,3\n\tadd hl,de" + KILL_DE_FLAGS)
         assert result.strip().count("inc hl") == 3
 
     def test_ld_de_4_not_optimized(self):
         """ld de,4; add hl,de should NOT be converted to inc hl."""
-        result = optimize("\tld de,4\n\tadd hl,de")
+        result = optimize("\tld de,4\n\tadd hl,de" + KILL_DE_FLAGS)
         assert "add hl,de" in result
 
 
@@ -484,35 +491,35 @@ class TestMulStrengthReduction:
 
     def test_mul_by_2(self):
         """ld de,2; call ??mul16 -> add hl,hl"""
-        result = optimize("\tld de,2\n\tcall ??mul16")
+        result = optimize("\tld de,2\n\tcall ??mul16" + KILL_ALL_BUT_HL)
         assert "add hl,hl" in result
         assert result.strip().count("add hl,hl") == 1
         assert "call" not in result
 
     def test_mul_by_4(self):
         """ld de,4; call ??mul16 -> add hl,hl; add hl,hl"""
-        result = optimize("\tld de,4\n\tcall ??mul16")
+        result = optimize("\tld de,4\n\tcall ??mul16" + KILL_ALL_BUT_HL)
         assert result.strip().count("add hl,hl") == 2
         assert "call" not in result
 
     def test_mul_by_8(self):
         """ld de,8; call ??mul16 -> 3x add hl,hl"""
-        result = optimize("\tld de,8\n\tcall ??mul16")
+        result = optimize("\tld de,8\n\tcall ??mul16" + KILL_ALL_BUT_HL)
         assert result.strip().count("add hl,hl") == 3
 
     def test_mul_by_non_power_of_2(self):
         """ld de,3; call ??mul16 should NOT be strength-reduced."""
-        result = optimize("\tld de,3\n\tcall ??mul16")
+        result = optimize("\tld de,3\n\tcall ??mul16" + KILL_ALL_BUT_HL)
         assert "call" in result
 
     def test_mul_at_mul16(self):
         """ld de,2; call @mul16 -> add hl,hl"""
-        result = optimize("\tld de,2\n\tcall @mul16")
+        result = optimize("\tld de,2\n\tcall @mul16" + KILL_ALL_BUT_HL)
         assert "add hl,hl" in result
 
     def test_mul_dunder_mul16(self):
         """ld de,2; call __mul16 -> add hl,hl"""
-        result = optimize("\tld de,2\n\tcall __mul16")
+        result = optimize("\tld de,2\n\tcall __mul16" + KILL_ALL_BUT_HL)
         assert "add hl,hl" in result
 
 
@@ -521,14 +528,14 @@ class TestIncDecMem:
 
     def test_inc_mem(self):
         """ld a,(COUNT); inc a; ld (COUNT),a -> ld hl,COUNT; inc (hl)"""
-        asm = "\tld a,(COUNT)\n\tinc a\n\tld (COUNT),a"
+        asm = "\tld a,(COUNT)\n\tinc a\n\tld (COUNT),a\n\tld a,1\n\tld hl,0"
         result = optimize(asm)
         assert "inc (hl)" in result
         assert "ld hl,COUNT" in result
 
     def test_dec_mem(self):
         """ld a,(COUNT); dec a; ld (COUNT),a -> ld hl,COUNT; dec (hl)"""
-        asm = "\tld a,(COUNT)\n\tdec a\n\tld (COUNT),a"
+        asm = "\tld a,(COUNT)\n\tdec a\n\tld (COUNT),a\n\tld a,1\n\tld hl,0"
         result = optimize(asm)
         assert "dec (hl)" in result
         assert "ld hl,COUNT" in result
@@ -539,14 +546,14 @@ class TestDjnz:
 
     def test_dec_b_jr_nz(self):
         """dec b; jr nz,LOOP -> djnz LOOP"""
-        asm = "LOOP:\n\tnop\n\tdec b\n\tjr nz,LOOP"
+        asm = "LOOP:\n\tnop\n\tdec b\n\tjr nz,LOOP\n\tcp c"
         result = optimize(asm)
         assert "djnz LOOP" in result
         assert "dec b" not in result
 
     def test_dec_b_jp_nz(self):
         """dec b; jp nz,LOOP -> djnz LOOP (if in range)"""
-        asm = "LOOP:\n\tnop\n\tdec b\n\tjp nz,LOOP"
+        asm = "LOOP:\n\tnop\n\tdec b\n\tjp nz,LOOP\n\tcp c"
         result = optimize(asm)
         assert "djnz LOOP" in result
 
@@ -556,7 +563,7 @@ class TestShiftToZ80:
 
     def test_shr_hl(self):
         """or a; ld a,h; rra; ld h,a; ld a,l; rra; ld l,a -> srl h; rr l"""
-        asm = "\tor a\n\tld a,h\n\trra\n\tld h,a\n\tld a,l\n\trra\n\tld l,a"
+        asm = "\tor a\n\tld a,h\n\trra\n\tld h,a\n\tld a,l\n\trra\n\tld l,a\n\tld a,1\n\tcp b"
         result = optimize(asm)
         assert "srl h" in result
         assert "rr l" in result
@@ -568,13 +575,13 @@ class TestSubdeZero:
 
     def test_subde_zero_eliminated(self):
         """ld de,0; call ??subde -> nothing"""
-        result = optimize("\tld de,0\n\tcall ??subde")
-        assert result.strip() == ""
+        result = optimize("\tld de,0\n\tcall ??subde" + KILL_ALL_BUT_HL)
+        assert result.strip() == KILL_ALL_BUT_HL.strip()
 
     def test_subde_zero_at_variant(self):
         """ld de,0; call @subde -> nothing"""
-        result = optimize("\tld de,0\n\tcall @subde")
-        assert result.strip() == ""
+        result = optimize("\tld de,0\n\tcall @subde" + KILL_ALL_BUT_HL)
+        assert result.strip() == KILL_ALL_BUT_HL.strip()
 
 
 class TestLdDeAddr:
@@ -685,9 +692,9 @@ class TestOutputIndentation:
 
     def test_pattern_replacement_uses_tabs(self):
         """Pattern replacements should use tab indentation."""
-        result = optimize("\tld a,0")
+        result = optimize("\tld a,0\n\tcp b")
         # Should be tab-indented xor a
-        assert "\txor a" in result or result.strip() == "xor a"
+        assert "\txor a" in result
 
     def test_push_pop_replacement_uses_tabs(self):
         """Push/pop copy replacements should use tab indentation."""

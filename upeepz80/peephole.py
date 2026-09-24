@@ -8,12 +8,385 @@ This module expects pure Z80 mnemonics as input (ld, jp, jr, etc.)
 and produces optimized Z80 assembly as output. All output uses
 lowercase mnemonics and register names.
 
+A rewrite that changes what a register or flag holds afterwards is made only
+where nothing reads the old value: the optimizer follows every path from the
+end of the rewritten code - on, into both arms of a branch, round loops - and
+the value must be overwritten before it is read on each.  A path that leaves
+the code the optimizer can see (a call, a return, ``jp (hl)``, a jump to a
+label defined elsewhere, data, the end of the text) counts as reading
+everything, since the caller, the callee or the other module may.
+
 For compilers that generate 8080 mnemonics, use upeep80 instead.
 """
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Callable
+
+from .z80 import (
+    PAIRS as _PAIRS,
+    BARRIERS,
+    DATA,
+    FLAGS,
+    FLAGS_NO_C,
+    JR_CONDITIONS,
+    TRANSPARENT,
+    UNKNOWN,
+    Effect,
+    classify,
+    effect,
+    parse_number,
+    split_operands,
+    strip_comment,
+)
+
+Instr = tuple[str, str]
+
+# What a call to the runtime multiply or subtract may change besides HL.
+_NOT_HL = frozenset("abcde") | FLAGS
+_MUL16 = ("??mul16", "@mul16", "__mul16")
+_SUBDE = ("??subde", "@subde")
+
+_LABEL = re.compile(r"^([A-Za-z_?@$.][\w?@$.]*)(::?)?(.*)$")
+_IDENT = re.compile(r"[A-Za-z_?@$.][\w?@$.]*")
+_SWAP = {"d": "h", "e": "l", "h": "d", "l": "e"}
+# Directives that give a name a value.  Only an `equ' gives it one value
+# throughout; the others may be redefined further down.
+_EQUATES = ("equ", "defl", "set", "=")
+
+
+@lru_cache(maxsize=1 << 16)
+def _split(line: str) -> tuple[str | None, str | None, str]:
+    """``(label, opcode, operands)`` of one line; opcode is lowercase and the
+    operands have no blanks around their commas.  ``NAME equ VALUE`` in
+    column 1 is a label with the opcode ``equ`` (or ``defl``, ``set``, ``=``)."""
+    text = strip_comment(line)
+    if not text.strip():
+        return None, None, ""
+    label = None
+    body = text
+    if not text[0].isspace():
+        m = _LABEL.match(text)
+        if m and m.group(2):
+            label, body = m.group(1), m.group(3)
+        elif m:
+            rest = m.group(3).split(None, 1)
+            if rest and rest[0].lower() in _EQUATES:
+                return m.group(1), rest[0].lower(), rest[1].strip() if len(rest) > 1 else ""
+    parts = body.split(None, 1)
+    if not parts:
+        return label, None, ""
+    operands = ",".join(split_operands(parts[1])) if len(parts) > 1 else ""
+    return label, parts[0].lower(), operands
+
+
+def _same_operand(a: str, b: str) -> bool:
+    return a.replace(" ", "").lower() == b.replace(" ", "").lower()
+
+
+# How many calls deep liveness follows into routines of the module, and how
+# many instructions one question may look at before it gives up and answers
+# "live".
+_MAX_FRAMES = 4
+_BUDGET = 50000
+
+# The halves of a register pair as it is pushed: (high byte, low byte).
+_HALVES = {"af": ("a", None), "bc": ("b", "c"), "de": ("d", "e"), "hl": ("h", "l"),
+           "ix": ("ixh", "ixl"), "iy": ("iyh", "iyl")}
+
+
+def _slots(need: frozenset) -> bool:
+    return any(type(x) is tuple for x in need)
+
+
+class _Routines:
+    """Where each line's ``ret`` goes, and how deep the stack is there.
+
+    A routine is a label that a ``call`` names and nothing else does - no
+    ``ld hl,L``, ``dw L``, ``public L`` or ``X equ L``, and no jump spelled
+    differently from the label.  Its code is what can be reached from the
+    label without going into a call.  A ``ret`` in code that only routines
+    reach returns to the line after one of their calls.  Code that can be
+    reached any other way - from the first line, from a label something
+    names, from after data, a directive, ``jp (hl)`` or an instruction not
+    recognised - may have been entered from anywhere, and so may its ``ret``
+    go anywhere.
+
+    ``height`` is the number of pushes outstanding since the routine was
+    entered, where every way to a line agrees on it, else None.
+    """
+
+    def __init__(self, code: "_Code"):
+        effects = code.effects
+        n = len(effects)
+        named: set[str] = set()
+        for idx, line in enumerate(code.lines):
+            _, op, operands = _split(line)
+            if op is None or not operands:
+                continue
+            eff = effects[idx]
+            direct = None
+            if eff is not None and eff.flow in ("jump", "branch", "call") and \
+                    code.target(eff.target) is not None:
+                direct = eff.target
+            for name in _IDENT.findall(operands):
+                if name != direct:
+                    named.add(name.lower())
+        self.calls: dict[int, list[int]] = {}
+        for idx, eff in enumerate(effects):
+            if eff is not None and eff.flow == "call":
+                t = code.target(eff.target)
+                if t is not None:
+                    self.calls.setdefault(t, []).append(idx + 1)
+        open_roots = {0}
+        for name, idx in code.label_lines:
+            if name.lower() in named or code.labels.get(name) is None:
+                open_roots.add(idx)
+        for idx, eff in enumerate(effects):
+            if eff is not None and eff.flow in ("stop", "data"):
+                open_roots.add(idx + 1)
+
+        def successors(i: int) -> list[int]:
+            eff = effects[i]
+            if eff is None or eff.flow == "next" or eff.flow == "call":
+                return [i + 1]
+            if eff.flow == "jump":
+                t = code.target(eff.target)
+                return [] if t is None else [t]
+            if eff.flow == "branch":
+                t = code.target(eff.target)
+                return [i + 1] if t is None else [i + 1, t]
+            if eff.flow == "return" and eff.cond:
+                return [i + 1]
+            return []
+
+        self.open = [False] * (n + 1)
+        self.entries: list[set[int]] = [set() for _ in range(n + 1)]
+        roots = sorted(open_roots | set(self.calls))
+        for root in roots:
+            is_open = root in open_roots
+            stack = [root]
+            reached: set[int] = set()
+            while stack:
+                i = stack.pop()
+                if i in reached or i >= n:
+                    continue
+                reached.add(i)
+                if is_open:
+                    self.open[i] = True
+                else:
+                    self.entries[i].add(root)
+                stack.extend(successors(i))
+
+        # Stack heights: 0 where a routine (or anything else) is entered.
+        unset = object()
+        height: list = [unset] * (n + 1)
+        work = []
+        for root in roots:
+            if root < n:
+                height[root] = 0
+                work.append(root)
+        while work:
+            i = work.pop()
+            h = height[i]
+            eff = effects[i]
+            if h is None or eff is None:
+                after = h
+            elif eff.stack is None:
+                after = None
+            else:
+                after = h + eff.stack
+            for j in successors(i):
+                if j >= n:
+                    continue
+                old = height[j]
+                if old is unset:
+                    height[j] = after
+                elif old is None or old == after:
+                    continue
+                else:
+                    height[j] = None  # two ways in disagree
+                work.append(j)
+        self.height: list[int | None] = [None if h is unset else h for h in height]
+
+    def continuations(self, i: int) -> list[int] | None:
+        """The lines a ``ret`` at line ``i`` may return to, or None if any."""
+        if self.open[i] or not self.entries[i]:
+            return None
+        out: list[int] = []
+        for root in self.entries[i]:
+            out.extend(self.calls[root])
+        return out
+
+
+class _Code:
+    """One version of the program: what each line does, and where labels are."""
+
+    def __init__(self, lines: list[str]):
+        self.lines = lines
+        self.effects: list[Effect | None] = []
+        self.labels: dict[str, int | None] = {}
+        self.label_lines: list[tuple[str, int]] = []
+        self.equ: dict[str, int] = {}
+        seen_equ: set[str] = set()
+        for idx, line in enumerate(lines):
+            label, op, operands = _split(line)
+            if op in _EQUATES and label and (op != "set" or "," not in operands):
+                v = parse_number(operands)
+                if op == "equ" and v is not None and label not in seen_equ:
+                    self.equ[label] = v
+                else:
+                    self.equ.pop(label, None)
+                seen_equ.add(label)
+                self.effects.append(None)
+                continue
+            if label:
+                # A label defined twice is nowhere in particular.
+                self.labels[label] = None if label in self.labels else idx
+                self.label_lines.append((label, idx))
+            self.effects.append(None if op is None else effect(op, operands))
+        self._routines: _Routines | None = None
+
+    def target(self, name: str | None) -> int | None:
+        if name is None:
+            return None
+        return self.labels.get(name)
+
+    @property
+    def routines(self) -> _Routines:
+        if self._routines is None:
+            self._routines = _Routines(self)
+        return self._routines
+
+    def live(self, starts: list[int], resources: frozenset[str] | set[str]) -> bool:
+        """May any of ``resources``, as they are at the lines ``starts``, be
+        read on some path from there before it is written?
+
+        Every path is followed: on, into both arms of a branch, round loops,
+        into a routine of the module that is called and back after the call,
+        and from a ``ret`` to the line after each call of the routine.  A
+        value pushed is followed through its slot on the stack to the pop
+        that takes it off.  What cannot be followed - a call or jump out of
+        the module, ``jp (hl)``, a ``ret`` from code entered who knows how,
+        data, the end of the text, a stack that is not balanced - reads
+        everything."""
+        need0 = frozenset(resources)
+        if not need0:
+            return False
+        routines = self.routines
+        height = routines.height
+        n = len(self.effects)
+        work: list[tuple[int | None, frozenset, tuple[int, ...]]] = [(s, need0, ()) for s in starts]
+        seen: dict[tuple[int, tuple[int, ...]], list[frozenset]] = {}
+        budget = _BUDGET
+        while work:
+            i, need, frames = work.pop()
+            while True:
+                if i is None or i >= n:
+                    return True
+                eff = self.effects[i]
+                if eff is None:
+                    i += 1
+                    continue
+                budget -= 1
+                if budget < 0:
+                    return True
+                key = (i, frames)
+                prior = seen.setdefault(key, [])
+                if any(need <= p for p in prior):
+                    break
+                prior.append(need)
+                depth = len(frames)
+                h = height[i]
+
+                if eff.stack == 1 and eff.pair:
+                    # push: the value is still in the register, and now in a
+                    # stack slot as well.
+                    hit = need & _PAIRS[eff.pair]
+                    if hit:
+                        if h is None:
+                            return True
+                        hi, _ = _HALVES[eff.pair]
+                        need = frozenset(x for x in need
+                                         if not (type(x) is tuple and x[:2] == (depth, h + 1)))
+                        need = need | {(depth, h + 1, "hi" if x == hi else "lo",
+                                        x if eff.pair == "af" and x != "a" else None)
+                                       for x in hit}
+                    i += 1
+                    continue
+                if eff.stack == -1 and eff.pair:
+                    # pop: what was in the slot is in the register now.
+                    need = need - _PAIRS[eff.pair]
+                    if _slots(need):
+                        if h is None or h <= 0:
+                            return True
+                        hi, lo = _HALVES[eff.pair]
+                        mine = {x for x in need if type(x) is tuple and x[:2] == (depth, h)}
+                        need = need - mine
+                        for _, _, half, piece in mine:
+                            if half == "hi":
+                                need = need | {hi}
+                            elif eff.pair == "af":
+                                need = need | ({piece} if piece else FLAGS)
+                            else:
+                                need = need | {lo}
+                    if not need:
+                        break
+                    i += 1
+                    continue
+
+                if eff.reads & need:
+                    return True
+                if eff.flow == "call":
+                    t = self.target(eff.target)
+                    if t is None or depth >= _MAX_FRAMES:
+                        return True
+                    if eff.cond:
+                        work.append((i + 1, need, frames))
+                    frames = frames + (i + 1,)
+                    i = t
+                    continue
+                if eff.flow == "return":
+                    if eff.cond:
+                        work.append((i + 1, need, frames))
+                    if h != 0:
+                        return True
+                    # This routine's slots are below SP now.
+                    need = frozenset(x for x in need if not (type(x) is tuple and x[0] == depth))
+                    if not need:
+                        break
+                    if frames:
+                        i = frames[-1]
+                        frames = frames[:-1]
+                        continue
+                    conts = routines.continuations(i)
+                    if conts is None:
+                        return True
+                    work.extend((c, need, ()) for c in conts)
+                    break
+                if (eff.stack is None or "sp" in eff.reads) and _slots(need):
+                    return True
+                if eff.swap_de_hl:
+                    need = frozenset(_SWAP.get(x, x) for x in need)
+                need = need - eff.writes
+                if not need:
+                    break
+                if eff.flow == "next":
+                    i += 1
+                elif eff.flow == "jump":
+                    i = self.target(eff.target)
+                elif eff.flow == "branch":
+                    t = self.target(eff.target)
+                    if t is None:
+                        return True
+                    work.append((t, need, frames))
+                    i += 1
+                else:
+                    return True
+        return False
 
 
 @dataclass
@@ -27,6 +400,13 @@ class PeepholePattern:
     replacement: list[tuple[str, str]] | None
     # Optional condition function
     condition: Callable[[list[tuple[str, str]]], bool] | None = None
+    # Registers and flags (named as in upeepz80.z80) whose contents the
+    # rewrite changes.  The pattern is applied only where each of them is
+    # dead: overwritten before it is read on every path, from instruction
+    # ``dead_from`` of the match on (by default, from the end of the match).
+    # A callable is given the matched instructions.
+    clobbers: frozenset[str] | Callable[[list[tuple[str, str]]], frozenset[str]] = frozenset()
+    dead_from: int | None = None
 
 
 class PeepholeOptimizer:
@@ -46,6 +426,8 @@ class PeepholeOptimizer:
 
     def _init_patterns(self) -> list[PeepholePattern]:
         """Initialize Z80 peephole optimization patterns."""
+        hl = frozenset("hl")
+        flags_no_c = FLAGS_NO_C
         return [
             # Push/Pop elimination: push rr; pop rr -> (nothing)
             PeepholePattern(
@@ -61,17 +443,20 @@ class PeepholeOptimizer:
                 replacement=None,  # Keep first only
                 condition=lambda ops: ops[0][1].split(",")[1].lower() == ops[1][1].split(",")[0].lower(),
             ),
-            # Zero A: ld a,0 -> xor a (smaller, faster)
+            # Zero A: ld a,0 -> xor a (smaller, faster), which sets every flag
             PeepholePattern(
                 name="zero_a_ld",
                 pattern=[("ld", "a,0")],
                 replacement=[("xor", "a")],
+                clobbers=FLAGS,
             ),
-            # Compare to zero: cp 0 -> or a (sets Z flag, smaller)
+            # Compare to zero: cp 0 -> or a.  S, Z, H and C come out the same;
+            # P/V (overflow, not parity) and N do not.
             PeepholePattern(
                 name="cp_zero",
                 pattern=[("cp", "0")],
                 replacement=[("or", "a")],
+                clobbers=frozenset({"fp", "fn"}),
             ),
             # Redundant duplicate ld: ld x,y; ld x,y -> ld x,y
             PeepholePattern(
@@ -91,17 +476,19 @@ class PeepholeOptimizer:
                                       ops[0][1].split(",")[0].strip().lower() in
                                       ("a", "b", "c", "d", "e", "h", "l"),
             ),
-            # inc a; dec a -> (nothing)
+            # inc a; dec a -> (nothing); the flags are the dec's, not the old ones
             PeepholePattern(
                 name="inc_dec_a",
                 pattern=[("inc", "a"), ("dec", "a")],
                 replacement=[],
+                clobbers=flags_no_c,
             ),
             # dec a; inc a -> (nothing)
             PeepholePattern(
                 name="dec_inc_a",
                 pattern=[("dec", "a"), ("inc", "a")],
                 replacement=[],
+                clobbers=flags_no_c,
             ),
             # inc hl; dec hl -> (nothing)
             PeepholePattern(
@@ -169,17 +556,19 @@ class PeepholeOptimizer:
                 pattern=[("ex", "(sp),hl"), ("ex", "(sp),hl")],
                 replacement=[],
             ),
-            # ccf; ccf -> (nothing) - complement carry twice
+            # ccf; ccf -> (nothing) - C is back, but H and N are the ccf's
             PeepholePattern(
                 name="double_ccf",
                 pattern=[("ccf", ""), ("ccf", "")],
                 replacement=[],
+                clobbers=frozenset({"fh", "fn"}),
             ),
-            # cpl; cpl -> (nothing) - complement A twice
+            # cpl; cpl -> (nothing) - A is back, but cpl sets H and N
             PeepholePattern(
                 name="double_cpl",
                 pattern=[("cpl", ""), ("cpl", "")],
                 replacement=[],
+                clobbers=frozenset({"fh", "fn"}),
             ),
             # push hl; pop de -> ld d,h; ld e,l (faster: 21 cycles -> 8 cycles)
             PeepholePattern(
@@ -235,29 +624,33 @@ class PeepholeOptimizer:
                 pattern=[("ret", ""), ("ret", "")],
                 replacement=[("ret", "")],
             ),
-            # ld a,(hl); ld e,a -> ld e,(hl)
+            # ld a,(hl); ld e,a -> ld e,(hl), where A is not read afterwards
             PeepholePattern(
                 name="ld_a_hl_ld_ea",
                 pattern=[("ld", "a,(hl)"), ("ld", "e,a")],
                 replacement=[("ld", "e,(hl)")],
+                clobbers=frozenset("a"),
             ),
             # ld a,(hl); ld d,a -> ld d,(hl)
             PeepholePattern(
                 name="ld_a_hl_ld_da",
                 pattern=[("ld", "a,(hl)"), ("ld", "d,a")],
                 replacement=[("ld", "d,(hl)")],
+                clobbers=frozenset("a"),
             ),
             # ld a,(hl); ld c,a -> ld c,(hl)
             PeepholePattern(
                 name="ld_a_hl_ld_ca",
                 pattern=[("ld", "a,(hl)"), ("ld", "c,a")],
                 replacement=[("ld", "c,(hl)")],
+                clobbers=frozenset("a"),
             ),
             # ld a,(hl); ld b,a -> ld b,(hl)
             PeepholePattern(
                 name="ld_a_hl_ld_ba",
                 pattern=[("ld", "a,(hl)"), ("ld", "b,a")],
                 replacement=[("ld", "b,(hl)")],
+                clobbers=frozenset("a"),
             ),
             # ld b,a; ld a,b -> ld b,a
             PeepholePattern(
@@ -313,11 +706,12 @@ class PeepholeOptimizer:
                                        ops[0][1].lower().endswith("),a") and
                                        ops[1][1].lower() == f"a,{ops[0][1][:-2].lower()}"),
             ),
-            # and 0ffh -> or a (same effect, smaller)
+            # and 0ffh -> or a (same effect, smaller) - but and sets H, or clears it
             PeepholePattern(
                 name="and_ff",
                 pattern=[("and", "0ffh")],
                 replacement=[("or", "a")],
+                clobbers=frozenset({"fh"}),
             ),
             # or 0 -> or a (same effect)
             PeepholePattern(
@@ -338,24 +732,29 @@ class PeepholeOptimizer:
                 pattern=[("push", "hl"), ("ex", "de,hl"), ("pop", "hl")],
                 replacement=[("ld", "d,h"), ("ld", "e,l")],
             ),
-            # ld h,0; ld d,h; ld e,l -> ld d,0; ld e,l
-            # d = h = 0, so just load d directly with 0
+            # ld h,0; ld d,h; ld e,l -> ld d,0; ld e,l, where H is not read
+            # afterwards (the ld h,0 is gone)
             PeepholePattern(
                 name="ld_h0_dh_el",
                 pattern=[("ld", "h,0"), ("ld", "d,h"), ("ld", "e,l")],
                 replacement=[("ld", "d,0"), ("ld", "e,l")],
+                clobbers=frozenset("h"),
             ),
             # Wasteful byte extension before byte op: ld l,a; ld h,0; sub x -> sub x
-            # (Also for cp, and, or, xor, add byte ops)
+            # (Also for cp.)  HL must be dead from the sub on - `sub l' reads it.
             PeepholePattern(
                 name="useless_extend_before_sub",
                 pattern=[("ld", "l,a"), ("ld", "h,0"), ("sub", None)],
                 replacement=None,  # Keep last only
+                clobbers=hl,
+                dead_from=2,
             ),
             PeepholePattern(
                 name="useless_extend_before_cp",
                 pattern=[("ld", "l,a"), ("ld", "h,0"), ("cp", None)],
                 replacement=None,  # Keep last only
+                clobbers=hl,
+                dead_from=2,
             ),
             # Redundant byte extension: ld l,a; ld h,0; ld l,a; ld h,0 -> ld l,a; ld h,0
             PeepholePattern(
@@ -376,23 +775,26 @@ class PeepholeOptimizer:
                 pattern=[("ld", "hl,0ffffh"), ("ld", "a,l"), ("or", "h")],
                 replacement=[("ld", "hl,0ffffh"), ("or", "a")],
             ),
-            # ld hl,1; ld a,l; or h -> ld a,1; or a (smaller)
+            # ld hl,1; ld a,l; or h -> ld a,1; or a (smaller), where HL is dead
             PeepholePattern(
                 name="test_true_const_1",
                 pattern=[("ld", "hl,1"), ("ld", "a,l"), ("or", "h")],
                 replacement=[("ld", "a,1"), ("or", "a")],
+                clobbers=hl,
             ),
-            # ld hl,1; ld c,l -> ld c,1 (for shift count)
+            # ld hl,1; ld c,l -> ld c,1 (for shift count), where HL is dead
             PeepholePattern(
                 name="ld_h1_cl",
                 pattern=[("ld", "hl,1"), ("ld", "c,l")],
                 replacement=[("ld", "c,1")],
+                clobbers=hl,
             ),
-            # ld hl,0; ld a,l; or h -> xor a (sets Z, clears A)
+            # ld hl,0; ld a,l; or h -> xor a (sets Z, clears A), where HL is dead
             PeepholePattern(
                 name="test_false_const",
                 pattern=[("ld", "hl,0"), ("ld", "a,l"), ("or", "h")],
                 replacement=[("xor", "a")],
+                clobbers=hl,
             ),
             # push hl; ld (addr),hl; pop hl -> ld (addr),hl
             # ld (addr),hl doesn't modify hl
@@ -411,12 +813,15 @@ class PeepholeOptimizer:
                 condition=lambda ops: ops[1][1].startswith("(") and ops[1][1].lower().endswith("),a"),
             ),
             # ld a,l; ld h,0; ld (addr),a -> ld a,l; ld (addr),a
-            # ld h,0 is useless before store
+            # ld h,0 is useless before the store if nothing - the store's own
+            # address included, as in `ld (hl),a' - reads H.
             PeepholePattern(
                 name="ld_al_h0_sta",
                 pattern=[("ld", "a,l"), ("ld", "h,0"), ("ld", None)],
                 replacement=None,  # Keep ld a,l and ld (addr),a
                 condition=lambda ops: ops[2][1].startswith("(") and ops[2][1].lower().endswith("),a"),
+                clobbers=frozenset("h"),
+                dead_from=2,
             ),
             # ld l,a; ld h,0; ld (addr),a -> ld (addr),a
             # If we're just storing A, no need to extend to hl first
@@ -425,6 +830,8 @@ class PeepholeOptimizer:
                 pattern=[("ld", "l,a"), ("ld", "h,0"), ("ld", None)],
                 replacement=None,  # Keep only store
                 condition=lambda ops: ops[2][1].startswith("(") and ops[2][1].lower().endswith("),a"),
+                clobbers=hl,
+                dead_from=2,
             ),
             # ld a,l; ld h,0; or h -> ld a,l; or a
             # h is 0, so or h is same as or a but or a is smaller
@@ -432,6 +839,7 @@ class PeepholeOptimizer:
                 name="ld_al_h0_or_h",
                 pattern=[("ld", "a,l"), ("ld", "h,0"), ("or", "h")],
                 replacement=[("ld", "a,l"), ("or", "a")],
+                clobbers=frozenset("h"),
             ),
             # ld h,0; or h -> ld h,0; or a
             PeepholePattern(
@@ -542,8 +950,72 @@ class PeepholeOptimizer:
 
         return "\n".join(lines)
 
+    # ---- matching -----------------------------------------------------------
+
+    def _window(self, lines: list[str], i: int, count: int, partial: bool = False
+                ) -> tuple[list[int], list[Instr], list[str], int] | None:
+        """The ``count`` instructions from line ``i`` on, if no label (which
+        another path could enter by), data or other directive that emits or
+        moves code comes first: their line numbers, the instructions, the
+        comment and blank lines between them, and the line after the last.
+        With ``partial``, as many as there are before such a line."""
+        idxs: list[int] = []
+        instrs: list[Instr] = []
+        skipped: list[str] = []
+        j = i
+        while len(instrs) < count:
+            if j >= len(lines):
+                break
+            line = lines[j]
+            stripped = line.strip()
+            if not stripped or stripped.startswith(";"):
+                skipped.append(line)
+                j += 1
+                continue
+            if self._is_label_line(line):
+                break
+            label, op, operands = _split(line)
+            if op is None or label is not None:
+                break
+            if op in TRANSPARENT and op not in _EQUATES:
+                skipped.append(line)
+                j += 1
+                continue
+            if op in DATA or op in BARRIERS or op in _EQUATES:
+                break
+            idxs.append(j)
+            instrs.append((op, operands))
+            j += 1
+        if len(instrs) < count and not partial:
+            return None
+        return idxs, instrs, skipped, j
+
+    def _prefix(self, lines: list[str], window: tuple[list[int], list[Instr], list[str], int] | None,
+                count: int) -> tuple[list[int], list[Instr], list[str], int] | None:
+        """The first ``count`` instructions of a partial window."""
+        if window is None:
+            return None
+        idxs, instrs, _, _ = window
+        if len(instrs) < count:
+            return None
+        first, last = idxs[0], idxs[count - 1]
+        taken = set(idxs[:count])
+        # The comment, blank and declaration lines among those taken.
+        skipped = [lines[k] for k in range(first, last) if k not in taken]
+        return idxs[:count], instrs[:count], skipped, last + 1
+
+    def _clobbers_dead(self, code: _Code, pattern: PeepholePattern,
+                       instrs: list[Instr], idxs: list[int]) -> bool:
+        dead = pattern.clobbers(instrs) if callable(pattern.clobbers) else pattern.clobbers
+        if not dead:
+            return True
+        start = idxs[pattern.dead_from] if pattern.dead_from is not None else idxs[-1] + 1
+        return not code.live([start], dead)
+
     def _optimize_pass(self, lines: list[str]) -> tuple[list[str], bool]:
         """Apply pattern-based optimizations."""
+        code = _Code(lines)
+        longest_pattern = max(len(p.pattern) for p in self.patterns)
         result: list[str] = []
         changed = False
         i = 0
@@ -552,20 +1024,22 @@ class PeepholeOptimizer:
             line = lines[i]
             stripped = line.strip()
 
-            # Skip empty lines, comments, labels, directives
-            if not stripped or stripped.startswith(';') or stripped.endswith(':'):
+            # Skip empty lines, comments, labels (also one with an instruction
+            # after it, which the rewrite would lose), directives
+            if not stripped or stripped.startswith(';') or self._is_label_line(line):
                 result.append(line)
                 i += 1
                 continue
 
-            if stripped.startswith('.') or stripped.lower().startswith(('org', 'equ', 'db', 'dw', 'ds')):
+            parsed = self._parse_line(line)
+            if parsed is None:
                 result.append(line)
                 i += 1
                 continue
 
             # Special case: jp/jr to immediately following label
-            parsed = self._parse_line(lines[i])
-            if parsed and parsed[0] in ("jp", "jr") and "," not in parsed[1] and parsed[1].lower() != "(hl)":
+            if parsed[0] in ("jp", "jr") and "," not in parsed[1] and \
+                    parsed[1].lower() not in ("(hl)", "(ix)", "(iy)"):
                 target = parsed[1]
                 # Look ahead for the target label (skip comments/empty lines)
                 j = i + 1
@@ -590,95 +1064,72 @@ class PeepholeOptimizer:
 
             # Try to match each pattern
             matched = False
+            longest = self._window(lines, i, longest_pattern, partial=True)
             for pattern in self.patterns:
-                match_len = len(pattern.pattern)
-                if i + match_len > len(lines):
+                if pattern.pattern[0][0] != parsed[0]:
+                    continue
+                window = self._prefix(lines, longest, len(pattern.pattern))
+                if window is None:
+                    continue
+                instruction_lines, instrs, skipped, j = window
+
+                if not self._matches_pattern(pattern, instrs):
+                    continue
+                if pattern.condition and not pattern.condition(instrs):
+                    continue
+                if not self._clobbers_dead(code, pattern, instrs, instruction_lines):
                     continue
 
-                # Extract instructions for pattern matching
-                instrs: list[tuple[str, str]] = []
-                instruction_lines: list[int] = []
-                skip_indices: list[int] = []
-                valid = True
+                # Pattern matched!
+                self.stats[pattern.name] = self.stats.get(pattern.name, 0) + 1
+                changed = True
+                matched = True
 
-                j = i
-                instr_count = 0
-                while instr_count < match_len and j < len(lines):
-                    instr_line = lines[j].strip()
-                    parsed = self._parse_line(lines[j])
-                    if parsed is None:
-                        # Check for label - breaks pattern matching
-                        if self._is_label_line(lines[j]):
-                            valid = False
-                            break
-                        skip_indices.append(j - i)
-                        j += 1
-                        continue
-                    instrs.append(parsed)
-                    instruction_lines.append(j)
-                    instr_count += 1
-                    j += 1
+                # Preserve skipped comments/empty lines
+                result.extend(skipped)
 
-                if not valid or len(instrs) != match_len:
-                    continue
+                # Apply replacement
+                if pattern.replacement is not None:
+                    for opcode, operands in pattern.replacement:
+                        if operands:
+                            result.append(f"\t{opcode} {operands}")
+                        else:
+                            result.append(f"\t{opcode}")
+                elif pattern.name.startswith("cond_uncond"):
+                    # Keep second instruction only
+                    result.append(lines[instruction_lines[-1]])
+                elif pattern.name in ("redundant_ld", "duplicate_ld", "ld_store_load_same", "sta_lda_same"):
+                    # Keep first instruction only
+                    result.append(lines[instruction_lines[0]])
+                elif pattern.name in ("useless_extend_before_sub", "useless_extend_before_cp"):
+                    # Keep last instruction only
+                    result.append(lines[instruction_lines[-1]])
+                elif pattern.name == "tail_call":
+                    # call x; ret -> jp x
+                    call_target = instrs[0][1]
+                    result.append(f"\tjp {call_target}")
+                elif pattern.name == "push_shld_pop":
+                    # Keep middle only
+                    result.append(lines[instruction_lines[1]])
+                elif pattern.name == "push_sta_pop":
+                    # Keep middle only
+                    result.append(lines[instruction_lines[1]])
+                elif pattern.name == "ld_al_h0_sta":
+                    # Keep LD A,L and LD (addr),A
+                    result.append(lines[instruction_lines[0]])
+                    result.append(lines[instruction_lines[2]])
+                elif pattern.name == "ld_la_h0_sta":
+                    # Keep only store
+                    result.append(lines[instruction_lines[2]])
+                elif pattern.name in ("lda_cp_jz_lda_same", "lda_cp_jnz_lda_same",
+                                      "lda_or_jz_lda_same", "lda_or_jnz_lda_same"):
+                    # Keep first 3 instructions
+                    result.append(lines[instruction_lines[0]])
+                    result.append(lines[instruction_lines[1]])
+                    result.append(lines[instruction_lines[2]])
 
-                # Check if pattern matches
-                if self._matches_pattern(pattern, instrs):
-                    # Apply condition if present
-                    if pattern.condition and not pattern.condition(instrs):
-                        continue
-
-                    # Pattern matched!
-                    self.stats[pattern.name] = self.stats.get(pattern.name, 0) + 1
-                    changed = True
-                    matched = True
-
-                    # Preserve skipped comments/empty lines
-                    for offset in skip_indices:
-                        result.append(lines[i + offset])
-
-                    # Apply replacement
-                    if pattern.replacement is not None:
-                        for opcode, operands in pattern.replacement:
-                            if operands:
-                                result.append(f"\t{opcode} {operands}")
-                            else:
-                                result.append(f"\t{opcode}")
-                    elif pattern.name.startswith("cond_uncond"):
-                        # Keep second instruction only
-                        result.append(lines[instruction_lines[-1]])
-                    elif pattern.name in ("redundant_ld", "duplicate_ld", "ld_store_load_same", "sta_lda_same"):
-                        # Keep first instruction only
-                        result.append(lines[instruction_lines[0]])
-                    elif pattern.name in ("useless_extend_before_sub", "useless_extend_before_cp"):
-                        # Keep last instruction only
-                        result.append(lines[instruction_lines[-1]])
-                    elif pattern.name == "tail_call":
-                        # call x; ret -> jp x
-                        call_target = instrs[0][1]
-                        result.append(f"\tjp {call_target}")
-                    elif pattern.name == "push_shld_pop":
-                        # Keep middle only
-                        result.append(lines[instruction_lines[1]])
-                    elif pattern.name == "push_sta_pop":
-                        # Keep middle only
-                        result.append(lines[instruction_lines[1]])
-                    elif pattern.name == "ld_al_h0_sta":
-                        # Keep LD A,L and LD (addr),A
-                        result.append(lines[instruction_lines[0]])
-                        result.append(lines[instruction_lines[2]])
-                    elif pattern.name == "ld_la_h0_sta":
-                        # Keep only store
-                        result.append(lines[instruction_lines[2]])
-                    elif pattern.name in ("lda_cp_jz_lda_same", "lda_cp_jnz_lda_same",
-                                          "lda_or_jz_lda_same", "lda_or_jnz_lda_same"):
-                        # Keep first 3 instructions
-                        result.append(lines[instruction_lines[0]])
-                        result.append(lines[instruction_lines[1]])
-                        result.append(lines[instruction_lines[2]])
-
-                    i = j
-                    break
+                i = j
+                break
 
             if not matched:
                 result.append(line)
@@ -686,225 +1137,178 @@ class PeepholeOptimizer:
 
         return result, changed
 
+    # ---- Z80-specific rewrites ----------------------------------------------
+
     def _optimize_z80_pass(self, lines: list[str]) -> tuple[list[str], bool]:
         """Apply Z80-specific inline optimizations."""
+        code = _Code(lines)
         changed = False
         result: list[str] = []
         i = 0
-
-        # Build label_lines map for range checking
-        label_lines: dict[str, int] = {}
-        for line_num, line in enumerate(lines):
-            if self._is_label_line(line):
-                label = line.strip().split(":")[0].strip()
-                label_lines[label] = line_num
-
         while i < len(lines):
-            parsed = self._parse_line(lines[i])
-
-            if parsed:
-                opcode, operands = parsed
-
-                # ld de,1/2/3; add hl,de -> inc hl (repeated)
-                # Saves 3/2/1 bytes respectively
-                if opcode == "ld" and operands.lower().startswith("de,"):
-                    const_str = operands[3:].strip()
-                    const_val = self._parse_const(const_str)
-                    if const_val is not None and 1 <= const_val <= 3:
-                        if i + 1 < len(lines):
-                            p1 = self._parse_line(lines[i + 1].strip())
-                            if p1 and p1[0] == "add" and p1[1].lower() == "hl,de":
-                                for _ in range(const_val):
-                                    result.append("\tinc hl")
-                                changed = True
-                                self.stats["inc_hl_const"] = self.stats.get("inc_hl_const", 0) + 1
-                                i += 2
-                                continue
-
-                # ld de,{power-of-2}; call ??mul16 -> add hl,hl (repeated)
-                # Strength reduction for multiply by power of 2
-                if opcode == "ld" and operands.lower().startswith("de,"):
-                    const_str = operands[3:].strip()
-                    const_val = self._parse_const(const_str)
-                    if const_val is not None and const_val > 1:
-                        # Check if power of 2: x & (x-1) == 0
-                        if (const_val & (const_val - 1)) == 0:
-                            if i + 1 < len(lines):
-                                p1 = self._parse_line(lines[i + 1].strip())
-                                if p1 and p1[0] == "call" and p1[1].lower() in ("??mul16", "@mul16", "__mul16"):
-                                    # Count shifts needed (log2)
-                                    shift_count = 0
-                                    temp = const_val
-                                    while temp > 1:
-                                        temp >>= 1
-                                        shift_count += 1
-                                    for _ in range(shift_count):
-                                        result.append("\tadd hl,hl")
-                                    changed = True
-                                    self.stats["mul_strength"] = self.stats.get("mul_strength", 0) + 1
-                                    i += 2
-                                    continue
-
-                # ld a,(addr); inc a; ld (addr),a -> ld hl,addr; inc (hl)
-                if opcode == "ld" and operands.lower().startswith("a,(") and operands.endswith(")"):
-                    addr = operands[3:-1]  # Extract address
-                    if i + 2 < len(lines):
-                        p1 = self._parse_line(lines[i + 1].strip())
-                        p2 = self._parse_line(lines[i + 2].strip())
-                        if (p1 and p1[0] == "inc" and p1[1].lower() == "a" and
-                            p2 and p2[0] == "ld" and p2[1].lower() == f"({addr.lower()}),a"):
-                            result.append(f"\tld hl,{addr}")
-                            result.append("\tinc (hl)")
-                            changed = True
-                            self.stats["inc_mem"] = self.stats.get("inc_mem", 0) + 1
-                            i += 3
-                            continue
-                        # Also check for dec a
-                        if (p1 and p1[0] == "dec" and p1[1].lower() == "a" and
-                            p2 and p2[0] == "ld" and p2[1].lower() == f"({addr.lower()}),a"):
-                            result.append(f"\tld hl,{addr}")
-                            result.append("\tdec (hl)")
-                            changed = True
-                            self.stats["dec_mem"] = self.stats.get("dec_mem", 0) + 1
-                            i += 3
-                            continue
-
-                # dec b; jr/jp nz,label -> djnz label
-                if opcode == "dec" and operands.lower() == "b" and i + 1 < len(lines):
-                    next_parsed = self._parse_line(lines[i + 1].strip())
-                    if next_parsed and next_parsed[0] in ("jr", "jp") and next_parsed[1].lower().startswith("nz,"):
-                        target = next_parsed[1][3:]  # Remove "NZ,"
-                        if target in label_lines:
-                            distance = label_lines[target] - i
-                            if -50 < distance < 50:
-                                result.append(f"\tdjnz {target}")
-                                changed = True
-                                self.stats["djnz"] = self.stats.get("djnz", 0) + 1
-                                i += 2
-                                continue
-
-                # 8080-style 16-bit right shift to Z80 native:
-                # or a / ld a,h / rra / ld h,a / ld a,l / rra / ld l,a -> srl h / rr l
-                # (7 instructions -> 2 instructions)
-                if opcode == "or" and operands.lower() == "a" and i + 6 < len(lines):
-                    p1 = self._parse_line(lines[i + 1].strip())
-                    p2 = self._parse_line(lines[i + 2].strip())
-                    p3 = self._parse_line(lines[i + 3].strip())
-                    p4 = self._parse_line(lines[i + 4].strip())
-                    p5 = self._parse_line(lines[i + 5].strip())
-                    p6 = self._parse_line(lines[i + 6].strip())
-                    if (p1 and p1[0] == "ld" and p1[1].lower() == "a,h" and
-                        p2 and p2[0] == "rra" and
-                        p3 and p3[0] == "ld" and p3[1].lower() == "h,a" and
-                        p4 and p4[0] == "ld" and p4[1].lower() == "a,l" and
-                        p5 and p5[0] == "rra" and
-                        p6 and p6[0] == "ld" and p6[1].lower() == "l,a"):
-                        result.append("\tsrl h")
-                        result.append("\trr l")
-                        changed = True
-                        self.stats["shr_z80"] = self.stats.get("shr_z80", 0) + 1
-                        i += 7
-                        continue
-
-                # Compare to zero via ??subde: ld de,0 / call ??subde -> (remove, just test)
-                # The subtraction of 0 is pointless before a zero test
-                if opcode == "ld" and operands.lower() == "de,0" and i + 1 < len(lines):
-                    p1 = self._parse_line(lines[i + 1].strip())
-                    if p1 and p1[0] == "call" and p1[1].lower() in ("??subde", "@subde"):
-                        # Skip both instructions - the value in HL is unchanged
-                        changed = True
-                        self.stats["subde_zero"] = self.stats.get("subde_zero", 0) + 1
-                        i += 2
-                        continue
-
-                # push hl; ld hl,(addr); ex de,hl; pop hl -> ld de,(addr)
-                # Z80 has direct ld de,(addr) which 8080 doesn't have
-                if opcode == "push" and operands.lower() == "hl" and i + 3 < len(lines):
-                    p1 = self._parse_line(lines[i + 1].strip())
-                    p2 = self._parse_line(lines[i + 2].strip())
-                    p3 = self._parse_line(lines[i + 3].strip())
-                    if (p1 and p1[0] == "ld" and p1[1].lower().startswith("hl,(") and p1[1].endswith(")") and
-                        p2 and p2[0] == "ex" and p2[1].lower() == "de,hl" and
-                        p3 and p3[0] == "pop" and p3[1].lower() == "hl"):
-                        addr = p1[1][3:]  # Get (addr) including parens
-                        result.append(f"\tld de,{addr}")
-                        changed = True
-                        self.stats["ld_de_addr"] = self.stats.get("ld_de_addr", 0) + 1
-                        i += 4
-                        continue
-
-                # ld hl,const; ld r,l -> ld r,const
-                # Only safe when BOTH halves of HL are dead after the
-                # pair — the transform drops the entire ``ld hl,const``.
-                # If anything later reads H or L before each is
-                # independently overwritten, leave the pair alone.
-                if opcode == "ld" and operands.lower().startswith("hl,") and not operands.lower().startswith("hl,("):
-                    const_val = operands[3:]
-                    if i + 1 < len(lines):
-                        p1 = self._parse_line(lines[i + 1].strip())
-                        if p1 and p1[0] == "ld" and p1[1].lower().endswith(",l"):
-                            dest_reg = p1[1][:-2]  # Get destination register
-                            if dest_reg.lower() in ("a", "b", "c", "d", "e"):
-                                if self._hl_pair_dead_after(lines, i + 2):
-                                    result.append(f"\tld {dest_reg.lower()},{const_val}")
-                                    changed = True
-                                    self.stats["ld_via_hl"] = self.stats.get("ld_via_hl", 0) + 1
-                                    i += 2
-                                    continue
-
-                # pop hl; push hl; ld hl,x -> ld hl,x
-                if opcode == "pop" and operands.lower() == "hl" and i + 2 < len(lines):
-                    p1 = self._parse_line(lines[i + 1].strip())
-                    p2 = self._parse_line(lines[i + 2].strip())
-                    if (p1 and p1[0] == "push" and p1[1].lower() == "hl" and
-                        p2 and p2[0] == "ld" and p2[1].lower().startswith("hl,")):
-                        result.append(lines[i + 2])  # Keep only ld hl,x
-                        changed = True
-                        self.stats["pop_push_ld"] = self.stats.get("pop_push_ld", 0) + 1
-                        i += 3
-                        continue
-
-                # ld hl,0; ld a,l; ld (addr),a -> xor a; ld (addr),a; ld hl,0
-                if opcode == "ld" and operands.lower() == "hl,0":
-                    if i + 2 < len(lines):
-                        p1 = self._parse_line(lines[i + 1].strip())
-                        p2 = self._parse_line(lines[i + 2].strip())
-                        if (p1 and p1[0] == "ld" and p1[1].lower() == "a,l" and
-                            p2 and p2[0] == "ld" and p2[1].startswith("(") and p2[1].lower().endswith("),a")):
-                            addr = p2[1][:-2]  # Get (addr) part
-                            result.append("\txor a")
-                            result.append(f"\tld {addr},a")
-                            result.append("\tld hl,0")
-                            changed = True
-                            self.stats["xor_a_store"] = self.stats.get("xor_a_store", 0) + 1
-                            i += 3
-                            continue
-
-                # ld hl,(addr1); push hl; ld hl,(addr2); ex de,hl; pop hl
-                # -> ld de,(addr2); ld hl,(addr1)
-                if opcode == "ld" and operands.lower().startswith("hl,(") and operands.endswith(")"):
-                    addr1 = operands[3:]  # Keep the (addr) part
-                    if i + 4 < len(lines):
-                        p1 = self._parse_line(lines[i + 1].strip())
-                        p2 = self._parse_line(lines[i + 2].strip())
-                        p3 = self._parse_line(lines[i + 3].strip())
-                        p4 = self._parse_line(lines[i + 4].strip())
-                        if (p1 and p1[0] == "push" and p1[1].lower() == "hl" and
-                            p2 and p2[0] == "ld" and p2[1].lower().startswith("hl,(") and
-                            p3 and p3[0] == "ex" and p3[1].lower() == "de,hl" and
-                            p4 and p4[0] == "pop" and p4[1].lower() == "hl"):
-                            addr2 = p2[1][3:]  # Get (addr2)
-                            result.append(f"\tld de,{addr2}")
-                            result.append(f"\tld hl,{addr1}")
-                            changed = True
-                            self.stats["ld_de_nn"] = self.stats.get("ld_de_nn", 0) + 1
-                            i += 5
-                            continue
-
+            rewrite = self._z80_rewrite(lines, code, i)
+            if rewrite is not None:
+                new_lines, i, stat = rewrite
+                result.extend(new_lines)
+                changed = True
+                self.stats[stat] = self.stats.get(stat, 0) + 1
+                continue
             result.append(lines[i])
             i += 1
-
         return result, changed
+
+    def _const_value(self, code: _Code, text: str) -> int | None:
+        """The value of a numeric literal, or of a symbol this text sets
+        with ``equ`` to one."""
+        v = parse_number(text)
+        if v is None:
+            v = code.equ.get(text.strip())
+        return v
+
+    def _z80_rewrite(self, lines: list[str], code: _Code, i: int
+                     ) -> tuple[list[str], int, str] | None:  # noqa: C901
+        """The rewrite of the code starting at line ``i``: (new lines, the
+        line to go on from, stat name), or None."""
+        if self._is_label_line(lines[i]):
+            return None
+        parsed = self._parse_line(lines[i])
+        if parsed is None:
+            return None
+        opcode, operands = parsed
+        low = operands.lower()
+
+        def dead(at: int, regs: frozenset[str] | set[str]) -> bool:
+            return not code.live([at], regs)
+
+        if opcode == "ld" and low.startswith("de,"):
+            val = self._const_value(code, operands[3:])
+            w = self._window(lines, i, 2)
+            if w is not None and val is not None:
+                _, ins, skipped, j = w
+                op1, arg1 = ins[1][0], ins[1][1].lower()
+                # ld de,1..3; add hl,de -> inc hl (repeated).  inc hl sets no
+                # flags where add sets H, N and C, and DE keeps its value.
+                if 1 <= val <= 3 and op1 == "add" and arg1 == "hl,de" and \
+                        dead(j, {"d", "e", "fh", "fn", "fc"}):
+                    return skipped + ["\tinc hl"] * val, j, "inc_hl_const"
+                # ld de,2^k; call ??mul16 -> add hl,hl (k times).  The routine
+                # may change any register but HL, and may leave something in
+                # them; they have to be dead.
+                if val > 1 and val & (val - 1) == 0 and op1 == "call" and \
+                        arg1 in _MUL16 and dead(j, _NOT_HL):
+                    return skipped + ["\tadd hl,hl"] * (val.bit_length() - 1), j, "mul_strength"
+                # ld de,0; call ??subde -> (nothing): HL - 0 is HL, but the
+                # routine sets the flags (and may use the other registers).
+                if val == 0 and op1 == "call" and arg1 in _SUBDE and dead(j, _NOT_HL):
+                    return skipped, j, "subde_zero"
+
+        # ld a,(addr); inc a; ld (addr),a -> ld hl,addr; inc (hl), where A
+        # and HL are dead.  The flags are the same: inc (hl) sets them as inc
+        # a does.
+        if opcode == "ld" and low.startswith("a,(") and operands.endswith(")"):
+            addr = operands[3:-1]
+            w = self._window(lines, i, 3)
+            if w is not None:
+                _, ins, skipped, j = w
+                (op1, arg1), (op2, arg2) = ins[1], ins[2]
+                if op1 in ("inc", "dec") and arg1.lower() == "a" and op2 == "ld" and \
+                        arg2.lower() == f"({addr.lower()}),a" and dead(j, {"a", "h", "l"}):
+                    return skipped + [f"\tld hl,{addr}", f"\t{op1} (hl)"], j, f"{op1}_mem"
+
+        # dec b; jr/jp nz,label -> djnz label.  dec b sets S, Z, H, P/V and N
+        # and djnz sets none, so they must be dead where the loop goes back
+        # and where it falls out.
+        if opcode == "dec" and low == "b":
+            w = self._window(lines, i, 2)
+            if w is not None:
+                idxs, ins, skipped, j = w
+                parts = split_operands(ins[1][1])
+                if ins[1][0] in ("jr", "jp") and len(parts) == 2 and parts[0].lower() == "nz":
+                    t = code.target(parts[1])
+                    if t is not None and -50 < t - i < 50 and \
+                            not code.live([t, idxs[1] + 1], FLAGS_NO_C):
+                        return skipped + [f"\tdjnz {parts[1]}"], j, "djnz"
+
+        # 8080-style 16-bit right shift to Z80 native:
+        # or a / ld a,h / rra / ld h,a / ld a,l / rra / ld l,a -> srl h / rr l
+        # (7 instructions -> 2).  A no longer ends up equal to L, and S, Z
+        # and P/V are rr l's where they were or a's.
+        if opcode == "or" and low == "a":
+            w = self._window(lines, i, 7)
+            if w is not None:
+                _, ins, skipped, j = w
+                shape = [(op, arg.lower()) for op, arg in ins[1:]]
+                if shape == [("ld", "a,h"), ("rra", ""), ("ld", "h,a"), ("ld", "a,l"),
+                             ("rra", ""), ("ld", "l,a")] and \
+                        dead(j, {"a", "fs", "fz", "fp"}):
+                    return skipped + ["\tsrl h", "\trr l"], j, "shr_z80"
+
+        # push hl; ld hl,(addr); ex de,hl; pop hl -> ld de,(addr)
+        # Z80 has direct ld de,(addr) which 8080 doesn't have
+        if opcode == "push" and low == "hl":
+            w = self._window(lines, i, 4)
+            if w is not None:
+                _, ins, skipped, j = w
+                (op1, arg1), (op2, arg2), (op3, arg3) = ins[1], ins[2], ins[3]
+                if op1 == "ld" and arg1.lower().startswith("hl,") and \
+                        classify(arg1[3:]).kind == "mem_abs" and \
+                        (op2, arg2.lower()) == ("ex", "de,hl") and (op3, arg3.lower()) == ("pop", "hl"):
+                    return skipped + [f"\tld de,{arg1[3:]}"], j, "ld_de_addr"
+
+        if opcode == "ld" and low.startswith("hl,") and not low.startswith("hl,("):
+            const_text = operands[3:]
+            # ld hl,const; ld r,l -> ld r,const, where both H and L are dead:
+            # the whole ld hl,const goes.
+            w = self._window(lines, i, 2)
+            if w is not None:
+                _, ins, skipped, j = w
+                op1, arg1 = ins[1]
+                if op1 == "ld" and arg1.lower().endswith(",l"):
+                    dest = arg1[:-2].strip().lower()
+                    if dest in ("a", "b", "c", "d", "e") and dead(j, {"h", "l"}):
+                        return skipped + [f"\tld {dest},{const_text}"], j, "ld_via_hl"
+            # ld hl,0; ld a,l; ld (addr),a -> xor a; ld (addr),a; ld hl,0, where
+            # the flags xor a sets are dead, and the store does not address
+            # through HL (which is 0 there in the original).
+            if parse_number(const_text) == 0:
+                w = self._window(lines, i, 3)
+                if w is not None:
+                    _, ins, skipped, j = w
+                    (op1, arg1), (op2, arg2) = ins[1], ins[2]
+                    dst = split_operands(arg2)
+                    if (op1, arg1.lower()) == ("ld", "a,l") and op2 == "ld" and len(dst) == 2 and \
+                            dst[1].lower() == "a" and \
+                            classify(dst[0]).kind in ("mem_abs", "mem_idx", "mem_bc", "mem_de") and \
+                            dead(j, FLAGS):
+                        return (skipped + ["\txor a", f"\tld {dst[0]},a", f"\tld hl,{const_text}"],
+                                j, "xor_a_store")
+
+        # pop hl; push hl; ld hl,x -> ld hl,x
+        if opcode == "pop" and low == "hl":
+            w = self._window(lines, i, 3)
+            if w is not None:
+                idxs, ins, skipped, j = w
+                if (ins[1][0], ins[1][1].lower()) == ("push", "hl") and ins[2][0] == "ld" and \
+                        ins[2][1].lower().startswith("hl,") and effect(*ins[2]) is not UNKNOWN:
+                    return skipped + [lines[idxs[2]]], j, "pop_push_ld"
+
+        # ld hl,(addr1); push hl; ld hl,(addr2); ex de,hl; pop hl
+        # -> ld de,(addr2); ld hl,(addr1)
+        if opcode == "ld" and low.startswith("hl,") and classify(operands[3:]).kind == "mem_abs":
+            w = self._window(lines, i, 5)
+            if w is not None:
+                _, ins, skipped, j = w
+                if (ins[1][0], ins[1][1].lower()) == ("push", "hl") and ins[2][0] == "ld" and \
+                        ins[2][1].lower().startswith("hl,") and \
+                        classify(ins[2][1][3:]).kind == "mem_abs" and \
+                        (ins[3][0], ins[3][1].lower()) == ("ex", "de,hl") and \
+                        (ins[4][0], ins[4][1].lower()) == ("pop", "hl"):
+                    return (skipped + [f"\tld de,{ins[2][1][3:]}", f"\tld hl,{operands[3:]}"],
+                            j, "ld_de_nn")
+
+        return None
+
+    # ---- relative jumps -----------------------------------------------------
 
     def _convert_to_relative_jumps(self, lines: list[str]) -> list[str]:
         """Convert jp to jr where the jump is within range."""
@@ -962,6 +1366,8 @@ class PeepholeOptimizer:
             result.append(line)
 
         return result
+
+    # ---- jump threading -----------------------------------------------------
 
     def _jump_threading_pass(self, lines: list[str]) -> tuple[list[str], bool]:
         """
@@ -1113,6 +1519,8 @@ class PeepholeOptimizer:
 
         return final_result, changed
 
+    # ---- dead stores --------------------------------------------------------
+
     def _dead_store_elimination(self, lines: list[str]) -> tuple[list[str], bool]:
         """
         Eliminate dead stores at procedure entry.
@@ -1204,10 +1612,16 @@ class PeepholeOptimizer:
             parsed = self._parse_line(text)
             if not parsed:
                 # A label definition or a directive. `public NAME' hands the
-                # name to another module, which may read it.
-                if re.match(r"^(public|global|extrn|external)\b", text):
-                    return True
-                continue
+                # name to another module, which may read it, and `ALIAS equ
+                # NAME' or `db low(NAME)' names it too; the line that defines
+                # the location is no use of it.
+                label, op, operand = _split(raw)
+                if label is not None and label.lower() == target and \
+                        target not in operand.lower():
+                    continue
+                if op is None:
+                    continue
+                return True
             op, operand = parsed[0], parsed[1] if len(parsed) > 1 else ""
             if op in ("public", "global", "extrn", "external"):
                 return True
@@ -1219,137 +1633,32 @@ class PeepholeOptimizer:
             return True
         return False
 
+    # ---- lines --------------------------------------------------------------
+
     def _is_label_line(self, line: str) -> bool:
         """Check if a raw (unstripped) line is a label definition."""
         return (":" in line and
                 not line.startswith(("\t", " ")) and
                 not line.startswith(";"))
 
-    def _hl_pair_dead_after(self, lines: list, start: int, lookahead: int = 12) -> bool:
-        """Return True if **both** H and L are provably dead from ``lines[start]``.
-
-        Conservative: scan up to ``lookahead`` instructions; if anything
-        reads H or L (directly or via HL-consuming insns like ``add
-        hl,*``, ``push hl``, ``ex de,hl``, ``ldir``) before something
-        overwrites the corresponding half, treat the pair as live. Branches,
-        calls, labels and rets in the window also force conservative bail.
-
-        Used to gate the ``ld hl,const; ld r,l -> ld r,const`` rewrite,
-        which drops the entire ``ld hl,const``. Just checking H wasn't
-        enough — the original ``ld hl,X`` also writes L, and the
-        surrounding code often reads L next (e.g. ``ld a,l`` after the
-        rewrite would read whatever was in L beforehand).
-        """
-        h_dead = False
-        l_dead = False
-        for k in range(start, min(start + lookahead, len(lines))):
-            ln = lines[k].strip()
-            if not ln or ln.startswith(";"):
-                continue
-            # Label or directive: bail conservative
-            if ":" in ln and not lines[k].startswith(("\t", " ")):
-                return False
-            p = self._parse_line(ln)
-            if p is None:
-                return False
-            op, ops = p[0], (p[1] or "").lower()
-            # Branches/calls/returns: bail.
-            if op in {"call", "ret", "jp", "jr", "djnz", "rst"}:
-                return False
-            # HL-clobbering writes (kill both halves).
-            if op == "ld" and ops.startswith("hl,"):
-                return True
-            if op == "pop" and ops == "hl":
-                return True
-            if op in {"ldir", "lddr", "ldi", "ldd"}:
-                # Reads HL/DE/BC as inputs, then clobbers all.
-                return False
-            # Individual half writes — H first.
-            if op == "ld" and ops.startswith("h,") and not h_dead:
-                h_dead = True
-            if op == "ld" and ops.startswith("l,") and not l_dead:
-                l_dead = True
-            # HL-reading ops kill any liveness benefit.
-            if op in {"push", "ex"} and (ops == "hl" or ops in {"de,hl", "(sp),hl"}):
-                return False
-            if op in {"add", "adc", "sbc"} and ops in {"hl,bc", "hl,de", "hl,hl", "hl,sp", "a,h", "a,l"}:
-                return False
-            if op in {"inc", "dec"} and ops == "hl":
-                return False
-            # Read of H specifically.
-            if op in {"or", "and", "xor", "cp", "sub", "inc", "dec"} and ops == "h" and not h_dead:
-                return False
-            if op == "ld" and ops.endswith(",h") and not h_dead:
-                return False
-            # Read of L specifically.
-            if op in {"or", "and", "xor", "cp", "sub", "inc", "dec"} and ops == "l" and not l_dead:
-                return False
-            if op == "ld" and ops.endswith(",l") and not l_dead:
-                return False
-            # If both halves have been killed by independent writes, the
-            # original 16-bit load was definitely unused.
-            if h_dead and l_dead:
-                return True
-        # Reached the end of the lookahead window without seeing either half
-        # read. Treat as dead.
-        return True
-
     def _parse_line(self, line: str) -> tuple[str, str] | None:
-        """Parse a Z80 assembly line into (opcode, operands)."""
-        is_indented = line != line.lstrip()
-        line = line.strip()
+        """Parse a Z80 assembly line into (opcode, operands).
 
-        if not line or line.startswith(";"):
+        A label in column 1 is dropped (the instruction after it, if any, is
+        returned), and so is a trailing comment.  Directives give None, except
+        ``dw``, whose operand jump threading follows."""
+        label, opcode, operands = _split(line)
+        if opcode is None:
             return None
-
-        # Handle labels (at column 0) with potential instruction after
-        if ":" in line and not is_indented:
-            parts = line.split(":", 1)
-            if len(parts) > 1 and parts[1].strip():
-                line = parts[1].strip()
-            else:
-                return None
-
-        # Skip directives (but not dw which we may need to thread)
-        directives = {"org", "end", "db", "ds", "equ", "public", "extrn"}
-
-        parts = line.split(None, 1)
-        if not parts:
+        if opcode in _EQUATES and label is not None:
             return None
-
-        opcode = parts[0].lower()
-        if opcode in directives:
+        if opcode in TRANSPARENT | DATA | BARRIERS and opcode != "dw":
             return None
-
-        operands = parts[1].split(";")[0].strip() if len(parts) > 1 else ""
-
         return (opcode, operands)
 
     def _parse_const(self, s: str) -> int | None:
         """Parse an assembly constant value. Returns None if not a constant."""
-        s = s.strip().upper()
-        if not s:
-            return None
-        # Skip if it's a label/symbol reference (starts with letter but not a number format)
-        if s[0].isalpha() and not s.endswith('H') and not s.endswith('B') and not s.endswith('O'):
-            return None
-        try:
-            # Handle hex (0FFH, 10H, 0x10)
-            if s.endswith('H'):
-                return int(s[:-1], 16)
-            # Handle binary (10101B)
-            if s.endswith('B') and all(c in '01' for c in s[:-1]):
-                return int(s[:-1], 2)
-            # Handle octal (77O, 77Q)
-            if s.endswith('O') or s.endswith('Q'):
-                return int(s[:-1], 8)
-            # Handle 0x prefix
-            if s.startswith('0X'):
-                return int(s, 16)
-            # Plain decimal
-            return int(s)
-        except ValueError:
-            return None
+        return parse_number(s)
 
     def _matches_pattern(
         self, pattern: PeepholePattern, instructions: list[tuple[str, str]]
@@ -1367,8 +1676,8 @@ class PeepholeOptimizer:
             if pat_operands is not None:
                 if "*" in pat_operands:
                     # Wildcard match
-                    pat_re = pat_operands.replace("*", ".*")
-                    if not re.match(pat_re, inst_operands, re.IGNORECASE):
+                    pat_re = ".*".join(re.escape(p) for p in pat_operands.split("*"))
+                    if not re.fullmatch(pat_re, inst_operands, re.IGNORECASE):
                         return False
                 elif pat_operands.lower() != inst_operands.lower():
                     return False
