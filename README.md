@@ -50,6 +50,7 @@ from upeepz80 import optimize
 # Optimize Z80 assembly code
 assembly = """
     ld a,0
+    or b
     push hl
     pop de
     jp LABEL
@@ -60,11 +61,16 @@ LABEL:
 optimized = optimize(assembly)
 print(optimized)
 # Output:
-#     xor a          ; ld a,0 → xor a (smaller)
+#     xor a          ; ld a,0 → xor a (smaller): or b sets the flags xor a changes
+#     or b
 #     ld d,h         ; push/pop → register moves (faster)
 #     ld e,l
+# LABEL:
 #     ret            ; jp to next instruction eliminated
 ```
+
+Without the `or b`, `ld a,0` stays: `xor a` also sets the flags, and the
+caller this code returns to might read them.
 
 ### Using the Optimizer Class
 
@@ -78,7 +84,7 @@ optimizer = PeepholeOptimizer()
 optimized_asm = optimizer.optimize(assembly_text)
 
 # Check statistics
-print(f"xor a conversions: {optimizer.stats.get('xor_a', 0)}")
+print(f"xor a conversions: {optimizer.stats.get('zero_a_ld', 0)}")
 print(f"Jump threading: {optimizer.stats.get('jump_thread', 0)}")
 print(f"djnz conversions: {optimizer.stats.get('djnz', 0)}")
 ```
@@ -87,12 +93,39 @@ print(f"djnz conversions: {optimizer.stats.get('djnz', 0)}")
 
 The optimizer runs multiple phases:
 
-1. **Pattern Matching** - Apply peephole patterns (up to 10 passes)
-2. **Z80-Specific Optimizations** - Inline patterns for Z80 instructions
-3. **Jump Threading** - Thread through intermediate jumps
-4. **Relative Jump Conversion** - Convert jp to jr where possible
-5. **djnz Optimization** - Convert dec b; jr nz to djnz
-6. **Dead Store Elimination** - Remove unused stores
+1. **Pattern Matching** and **Z80-Specific Optimizations** - peephole
+   patterns and inline rewrites, repeated until nothing changes (up to 10
+   passes)
+2. **Jump Threading** - Thread through intermediate jumps
+3. **Pattern Matching** once more, for what threading exposed
+4. **Dead Store Elimination** - Remove a parameter's store at procedure
+   entry when nothing reads it
+5. **Relative Jumps** - Convert jp to jr, and dec b; jp nz to djnz, where the
+   target is in reach; last, because it counts bytes
+
+## Correctness
+
+A rewrite that changes what a register or flag holds afterwards is made only
+where nothing reads the old value. `ld a,0` → `xor a` changes every flag, so
+it is made only where the flags are overwritten before they are read; `ld
+hl,5 / ld a,l` → `ld a,5` leaves HL as it was, so it is made only where HL
+is. The optimizer knows what each Z80 instruction reads and writes
+(`upeepz80/z80.py`), and follows every path from the rewritten code: on,
+into both arms of a branch, round loops, into a routine the text calls and
+back, from a `ret` to every call of the routine, and through a `push` to its
+`pop`. A path that leaves what the text shows - a call or jump to a label
+defined elsewhere, `call 5`, `jp 0`, `jp (hl)`, a `ret` from a routine that
+is `public` or whose address is taken, data, the end of the text - counts as
+reading everything.
+
+Every rewrite writes only instructions the Z80 has, and a relative jump is
+made only where its target is known to be within reach, counting bytes.
+
+`tests/peepfuzz.py` checks this: it generates random programs around every
+shape the optimizer rewrites, runs each before and after optimization on a
+Z80 interpreter (`tests/z80sim.py`, itself checked against a real Z80 core
+by `tests/simcheck.py`), and compares every register, flag and byte of
+memory.
 
 ## Architecture
 

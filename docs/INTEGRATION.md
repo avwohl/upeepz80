@@ -56,7 +56,7 @@ The optimizer tracks various statistics:
 
 ```python
 # After optimization
-print(f"xor a conversions: {optimizer.stats.get('xor_a', 0)}")
+print(f"xor a conversions: {optimizer.stats.get('zero_a_ld', 0)}")
 print(f"Jump threading: {optimizer.stats.get('jump_thread', 0)}")
 print(f"djnz conversions: {optimizer.stats.get('djnz', 0)}")
 print(f"jp to jr: {optimizer.stats.get('jr_convert', 0)}")
@@ -70,6 +70,7 @@ You can add custom patterns to the optimizer:
 
 ```python
 from upeepz80 import PeepholeOptimizer, PeepholePattern
+from upeepz80.z80 import FLAGS
 
 # Create optimizer
 optimizer = PeepholeOptimizer()
@@ -84,12 +85,23 @@ custom_pattern = PeepholePattern(
     replacement=[
         ("xor", "a"),
         ("ld", "b,a"),
-    ]
+    ],
+    # xor a sets the flags, which ld a,0 leaves alone: apply the pattern
+    # only where nothing reads them before they are set again.
+    clobbers=FLAGS,
 )
 
 # Add to optimizer
 optimizer.patterns.append(custom_pattern)
 ```
+
+A replacement that leaves any register or flag different from what the
+matched code leaves must name it in `clobbers` (register names `a` to `l`,
+`ixh`, `ixl`, `iyh`, `iyl`; flags `fs fz fh fp fn fc`). The pattern is then
+applied only where each is dead - overwritten before it is read on every path
+from the end of the match, or from instruction `dead_from` of the match on
+when an instruction kept from the match reads it. `clobbers` may also be a
+function of the matched instructions.
 
 ## Integration Example
 
