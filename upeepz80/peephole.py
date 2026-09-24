@@ -1202,18 +1202,27 @@ class PeepholeOptimizer:
                 if val == 0 and op1 == "call" and arg1 in _SUBDE and dead(j, _NOT_HL):
                     return skipped, j, "subde_zero"
 
-        # ld a,(addr); inc a; ld (addr),a -> ld hl,addr; inc (hl), where A
-        # and HL are dead.  The flags are the same: inc (hl) sets them as inc
-        # a does.
-        if opcode == "ld" and low.startswith("a,(") and operands.endswith(")"):
-            addr = operands[3:-1]
-            w = self._window(lines, i, 3)
-            if w is not None:
-                _, ins, skipped, j = w
-                (op1, arg1), (op2, arg2) = ins[1], ins[2]
-                if op1 in ("inc", "dec") and arg1.lower() == "a" and op2 == "ld" and \
-                        arg2.lower() == f"({addr.lower()}),a" and dead(j, {"a", "h", "l"}):
-                    return skipped + [f"\tld hl,{addr}", f"\t{op1} (hl)"], j, f"{op1}_mem"
+        # ld a,(x); inc a; ld (x),a -> ld hl,x; inc (hl) where A and HL are
+        # dead; for x = (hl) or (ix+d), inc (hl) or inc (ix+d) where A is.
+        # The flags are the same: inc (hl) sets them as inc a does.
+        if opcode == "ld" and low.startswith("a,"):
+            src = classify(operands[2:])
+            if src.kind in ("mem_abs", "mem_hl", "mem_idx"):
+                w = self._window(lines, i, 3)
+                if w is not None:
+                    _, ins, skipped, j = w
+                    (op1, arg1), (op2, arg2) = ins[1], ins[2]
+                    dst = split_operands(arg2)
+                    if op1 in ("inc", "dec") and arg1.lower() == "a" and op2 == "ld" and \
+                            len(dst) == 2 and dst[1].lower() == "a" and \
+                            _same_operand(dst[0], operands[2:]):
+                        if src.kind == "mem_abs":
+                            if dead(j, {"a", "h", "l"}):
+                                addr = operands[2:].strip()[1:-1].strip()
+                                return (skipped + [f"\tld hl,{addr}", f"\t{op1} (hl)"],
+                                        j, f"{op1}_mem")
+                        elif dead(j, {"a"}):
+                            return skipped + [f"\t{op1} {src.text.strip()}"], j, f"{op1}_mem"
 
         # dec b; jr/jp nz,label -> djnz label.  dec b sets S, Z, H, P/V and N
         # and djnz sets none, so they must be dead where the loop goes back
@@ -1257,20 +1266,26 @@ class PeepholeOptimizer:
 
         if opcode == "ld" and low.startswith("hl,") and not low.startswith("hl,("):
             const_text = operands[3:]
+            val = self._const_value(code, const_text)
             # ld hl,const; ld r,l -> ld r,const, where both H and L are dead:
-            # the whole ld hl,const goes.
+            # the whole ld hl,const goes.  The byte is L's, the constant's low
+            # byte (`ld a,299' does not assemble), and it is taken only from
+            # a constant whose value the text gives: a one-byte field holding
+            # part of a relocatable or external address is something some
+            # assemblers and linkers support and others do not.
             w = self._window(lines, i, 2)
-            if w is not None:
+            if w is not None and val is not None:
                 _, ins, skipped, j = w
                 op1, arg1 = ins[1]
                 if op1 == "ld" and arg1.lower().endswith(",l"):
                     dest = arg1[:-2].strip().lower()
                     if dest in ("a", "b", "c", "d", "e") and dead(j, {"h", "l"}):
-                        return skipped + [f"\tld {dest},{const_text}"], j, "ld_via_hl"
+                        byte = const_text.strip() if 0 <= val <= 255 else str(val & 0xFF)
+                        return skipped + [f"\tld {dest},{byte}"], j, "ld_via_hl"
             # ld hl,0; ld a,l; ld (addr),a -> xor a; ld (addr),a; ld hl,0, where
             # the flags xor a sets are dead, and the store does not address
             # through HL (which is 0 there in the original).
-            if parse_number(const_text) == 0:
+            if val == 0:
                 w = self._window(lines, i, 3)
                 if w is not None:
                     _, ins, skipped, j = w
