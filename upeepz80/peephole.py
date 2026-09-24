@@ -444,6 +444,15 @@ class PeepholePattern:
     dead_from: int | None = None
 
 
+def _duplicate_ld_ok(ops: list[Instr]) -> bool:
+    """``ld x,y`` twice is ``ld x,y`` once unless the first changes ``y``:
+    ``ld l,(hl)`` reads a different byte the second time."""
+    if ops[0][1].lower() != ops[1][1].lower():
+        return False
+    eff = effect("ld", ops[0][1])
+    return eff is not UNKNOWN and not (eff.reads & eff.writes) and "r" not in eff.reads
+
+
 class PeepholeOptimizer:
     """
     Peephole optimizer for Z80 assembly.
@@ -498,7 +507,7 @@ class PeepholeOptimizer:
                 name="duplicate_ld",
                 pattern=[("ld", None), ("ld", None)],
                 replacement=None,  # Keep first only
-                condition=lambda ops: ops[0][1].lower() == ops[1][1].lower(),
+                condition=_duplicate_ld_ok,
             ),
             # ld r,r -> (nothing)
             PeepholePattern(
@@ -647,11 +656,13 @@ class PeepholeOptimizer:
                 pattern=[("ccf", None), ("scf", None)],
                 replacement=[("scf", "")],
             ),
-            # call x; ret -> jp x (tail call optimization)
+            # call x; ret -> jp x (tail call optimization).  Not `call cc,x':
+            # when the call is not taken, the ret still has to happen.
             PeepholePattern(
                 name="tail_call",
                 pattern=[("call", None), ("ret", "")],
                 replacement=None,  # Replaced specially
+                condition=lambda ops: "," not in ops[0][1],
             ),
             # ret; ret -> ret (unreachable code)
             PeepholePattern(
@@ -803,12 +814,13 @@ class PeepholeOptimizer:
                 pattern=[("ld", "l,a"), ("ld", "h,0"), ("push", "hl"), ("ld", "l,a")],
                 replacement=[("ld", "l,a"), ("ld", "h,0"), ("push", "hl")],
             ),
-            # ld hl,0ffffh; ld a,l; or h -> ld hl,0ffffh; or a
-            # Since 0xFFFF is always true
+            # ld hl,0ffffh; ld a,l; or h -> ld a,0ffh; or a where HL is dead:
+            # A is 0FFH and the flags are those of 0FFH either way.
             PeepholePattern(
                 name="test_true_const",
                 pattern=[("ld", "hl,0ffffh"), ("ld", "a,l"), ("or", "h")],
-                replacement=[("ld", "hl,0ffffh"), ("or", "a")],
+                replacement=[("ld", "a,0ffh"), ("or", "a")],
+                clobbers=hl,
             ),
             # ld hl,1; ld a,l; or h -> ld a,1; or a (smaller), where HL is dead
             PeepholePattern(
@@ -1412,6 +1424,8 @@ class PeepholeOptimizer:
             i += 1
         return result, changed
 
+    # ---- jump threading -----------------------------------------------------
+
     def _jump_threading_pass(self, lines: list[str]) -> tuple[list[str], bool]:
         """
         Jump threading optimization.
@@ -1422,155 +1436,141 @@ class PeepholeOptimizer:
         changed = False
         code = _Code(lines)
 
-        # Build map of label -> (line index, first instruction after label)
-        label_info: dict[str, tuple[int, str | None]] = {}
+        # Build map of label -> (line index, first instruction at or after it)
+        label_info: dict[str, tuple[int, Instr | None]] = {}
         for i, line in enumerate(lines):
             if self._is_label_line(line):
-                label = line.strip().split(":")[0].strip()
-                # Find first instruction after this label
-                first_instr = None
-                for j in range(i + 1, len(lines)):
-                    next_line = lines[j].strip()
-                    if not next_line or next_line.startswith(";"):
-                        continue
-                    if self._is_label_line(lines[j]):
+                label, op, operands = _split(line)
+                if label is None or op in _EQUATES:
+                    continue
+                first_instr: Instr | None = None
+                if op is not None:
+                    # An instruction on the label's own line comes first.
+                    first_instr = self._parse_line(line)
+                else:
+                    for j in range(i + 1, len(lines)):
+                        next_line = lines[j].strip()
+                        if not next_line or next_line.startswith(";"):
+                            continue
+                        if self._is_label_line(lines[j]):
+                            break
+                        first_instr = self._parse_line(lines[j])
                         break
-                    first_instr = next_line
-                    break
                 label_info[label] = (i, first_instr)
+
+        def plain_jump(ins: Instr | None) -> str | None:
+            if ins and ins[0] in ("jp", "jr") and "," not in ins[1] and \
+                    ins[1].lower() not in ("(hl)", "(ix)", "(iy)"):
+                return ins[1].strip()
+            return None
 
         # Build map of label -> final destination
         label_target: dict[str, str] = {}
         for label, (_, first_instr) in label_info.items():
-            if first_instr:
-                parsed = self._parse_line(first_instr)
-                if parsed and parsed[0] in ("jp", "jr") and "," not in parsed[1] and parsed[1].lower() != "(hl)":
-                    target = parsed[1].strip()
-                    # Follow the chain
-                    visited = {label}
-                    while target in label_info and target not in visited:
-                        visited.add(target)
-                        _, target_instr = label_info[target]
-                        if target_instr:
-                            target_parsed = self._parse_line(target_instr)
-                            if target_parsed and target_parsed[0] in ("jp", "jr") and "," not in target_parsed[1] and target_parsed[1].lower() != "(hl)":
-                                target = target_parsed[1].strip()
-                            else:
-                                break
-                        else:
-                            break
-                    if target != label:
-                        label_target[label] = target
-
-        # Track which labels are referenced
-        label_refs: dict[str, int] = {label: 0 for label in label_info}
+            target = plain_jump(first_instr)
+            if target is None:
+                continue
+            # Follow the chain
+            visited = {label}
+            while target in label_info and target not in visited:
+                visited.add(target)
+                nxt = plain_jump(label_info[target][1])
+                if nxt is None:
+                    break
+                target = nxt
+            if target != label:
+                label_target[label] = target
 
         # Rewrite jumps to use final destinations
         result: list[str] = []
         for i, line in enumerate(lines):
-            parsed = self._parse_line(line)
-
-            if parsed and parsed[0] in ("jp", "jr", "call", "djnz"):
-                operands = parsed[1]
-                # Handle conditional jumps
-                if "," in operands:
-                    parts = operands.split(",", 1)
-                    target = parts[1].strip()
-                    prefix = parts[0] + ","
+            parsed = None if self._is_label_line(line) else self._parse_line(line)
+            if parsed and parsed[0] in ("jp", "jr") and "," not in parsed[1] and \
+                    parsed[1].strip() in label_target:
+                new_target = label_target[parsed[1].strip()]
+                if parsed[0] == "jp":
+                    result.append(f"\tjp {new_target}")
                 else:
-                    target = operands.strip()
-                    prefix = ""
-
-                # Thread through for unconditional jumps only.  A jr has to
-                # reach its new target; if it may not, it stays as it is
-                # (making it a jp would lengthen code other relative jumps
-                # already span).
-                if parsed[0] == "jr" and not prefix and target in label_target and \
-                        (code.target(label_target[target]) is None or
-                         not code.reaches(i, i, code.target(label_target[target]))):
-                    result.append(line)
-                    if target in label_refs:
-                        label_refs[target] += 1
-                elif parsed[0] in ("jp", "jr") and not prefix and target in label_target:
-                    new_target = label_target[target]
-                    if parsed[0] == "jp":
-                        result.append(f"\tjp {new_target}")
-                    else:
-                        result.append(f"\tjr {new_target}")
-                    changed = True
-                    self.stats["jump_thread"] = self.stats.get("jump_thread", 0) + 1
-                    label_refs[new_target] = label_refs.get(new_target, 0) + 1
-                else:
-                    result.append(line)
-                    if target in label_refs:
-                        label_refs[target] += 1
-            elif parsed and parsed[0] == "dw":
+                    # A jr has to reach its new target; if it may not, it
+                    # stays as it is (making it a jp would lengthen code
+                    # other relative jumps already span).
+                    t = code.target(new_target)
+                    if t is None or not code.reaches(i, i, t):
+                        result.append(line)
+                        continue
+                    result.append(f"\tjr {new_target}")
+                changed = True
+                self.stats["jump_thread"] = self.stats.get("jump_thread", 0) + 1
+            elif parsed and parsed[0] == "dw" and parsed[1].strip() in label_target:
                 # Thread dw references
-                target = parsed[1].strip()
-                if target in label_target:
-                    new_target = label_target[target]
-                    result.append(f"\tdw {new_target}")
-                    changed = True
-                    self.stats["dw_thread"] = self.stats.get("dw_thread", 0) + 1
-                    label_refs[new_target] = label_refs.get(new_target, 0) + 1
-                else:
-                    result.append(line)
-                    if target in label_refs:
-                        label_refs[target] += 1
+                result.append(f"\tdw {label_target[parsed[1].strip()]}")
+                changed = True
+                self.stats["dw_thread"] = self.stats.get("dw_thread", 0) + 1
             else:
                 result.append(line)
-                if not self._is_label_line(line):
-                    stripped = line.strip()
-                    for label in label_info:
-                        if label in stripped:
-                            label_refs[label] = label_refs.get(label, 0) + 1
 
-        # Remove unreferenced labels that just jump
+        # What names each label: any mention of it outside its definition,
+        # in any instruction or directive, counts.
+        refs: dict[str, int] = {}
+        for line in result:
+            label, op, operands = _split(line)
+            if op is None:
+                continue
+            for name in _IDENT.findall(operands):
+                refs[name.lower()] = refs.get(name.lower(), 0) + 1
+
+        # Remove unreferenced labels that just jump, where nothing falls into them
         final_result: list[str] = []
         i = 0
         while i < len(result):
             line = result[i]
-            stripped = line.strip()
 
             if self._is_label_line(line):
-                label = stripped.split(":")[0].strip()
-
-                if label in label_refs and label_refs[label] == 0 and label in label_target:
-                    # Check if previous instruction prevents fall-through
-                    can_fallthrough = True
-                    for j in range(len(final_result) - 1, -1, -1):
-                        prev = final_result[j].strip()
-                        if not prev or prev.startswith(";"):
-                            continue
-                        if self._is_label_line(final_result[j]):
-                            break
-                        prev_parsed = self._parse_line(final_result[j])
-                        if prev_parsed:
-                            if prev_parsed[0] in ("jp", "jr", "ret") and "," not in prev_parsed[1]:
-                                can_fallthrough = False
-                            break
-
-                    if not can_fallthrough:
-                        changed = True
-                        self.stats["dead_label_removed"] = self.stats.get("dead_label_removed", 0) + 1
-                        i += 1
-                        # Skip the jump instruction too
-                        while i < len(result):
-                            next_line = result[i].strip()
-                            if not next_line or next_line.startswith(";"):
-                                i += 1
-                                continue
-                            next_parsed = self._parse_line(next_line)
-                            if next_parsed and next_parsed[0] in ("jp", "jr"):
-                                i += 1
-                                break
-                            break
+                label, op, _ = _split(line)
+                if label is not None and label in label_target and refs.get(label.lower(), 0) == 0 and \
+                        not self._falls_through(final_result):
+                    changed = True
+                    self.stats["dead_label_removed"] = self.stats.get("dead_label_removed", 0) + 1
+                    i += 1
+                    if op is not None:
+                        # The jump was on the label's own line.
                         continue
+                    # Skip the jump instruction too
+                    while i < len(result):
+                        next_line = result[i].strip()
+                        if not next_line or next_line.startswith(";"):
+                            i += 1
+                            continue
+                        next_parsed = self._parse_line(next_line)
+                        if next_parsed and next_parsed[0] in ("jp", "jr"):
+                            i += 1
+                            break
+                        break
+                    continue
 
             final_result.append(line)
             i += 1
 
         return final_result, changed
+
+    def _falls_through(self, done: list[str]) -> bool:
+        """Can control run off the end of ``done`` into what follows?"""
+        for j in range(len(done) - 1, -1, -1):
+            prev = done[j].strip()
+            if not prev or prev.startswith(";"):
+                continue
+            if self._is_label_line(done[j]) and _split(done[j])[1] is None:
+                return True
+            parsed = self._parse_line(done[j])
+            if parsed is None:
+                return True
+            op, operands = parsed
+            if op in ("jp", "jr") and "," not in operands:
+                return False
+            if op in ("ret", "reti", "retn") and not operands:
+                return False
+            return True
+        return True
 
     # ---- dead stores --------------------------------------------------------
 
@@ -1606,26 +1606,15 @@ class PeepholeOptimizer:
             stripped = line.strip()
 
             # Look for procedure entry (label followed by ld (addr),a)
-            if self._is_label_line(line) and not stripped.startswith("??"):
-                label = stripped.split(":")[0].strip()
-                if i + 1 < len(lines):
+            if self._is_label_line(line) and not stripped.startswith("??") and \
+                    _split(line)[1] is None:
+                if i + 1 < len(lines) and not self._is_label_line(lines[i + 1]):
                     parsed = self._parse_line(lines[i + 1])
                     # Check for ld (addr),a pattern
                     if (parsed and parsed[0] == "ld" and
-                        parsed[1].startswith("(") and parsed[1].lower().endswith("),a")):
+                            parsed[1].startswith("(") and parsed[1].lower().endswith("),a") and
+                            classify(parsed[1][:-2]).kind == "mem_abs"):
                         addr = parsed[1][1:-3]  # Extract addr from (addr),a
-                        # Find end of procedure - look for next top-level procedure
-                        # (non-nested label that doesn't start with @ or ?? and isn't
-                        # preceded by whitespace)
-                        proc_end = i + 2
-                        while proc_end < len(lines):
-                            if self._is_label_line(lines[proc_end]):
-                                lbl = lines[proc_end].strip().split(":")[0].strip()
-                                # Stop at next top-level procedure (not starting with @ or ??)
-                                # Nested procedures start with @ and internal labels with ??
-                                if not lbl.startswith("@") and not lbl.startswith("??"):
-                                    break
-                            proc_end += 1
 
                         # Check whether anything anywhere in the module reads
                         # the location, exports it, or takes its address.  The
@@ -1654,12 +1643,25 @@ class PeepholeOptimizer:
         if not target:
             return True
         paren = "(" + target + ")"
+        # A sixteen-bit load from the byte before reads this one too.
+        m = re.fullmatch(r"(.*?)\+(\d+)", target)
+        below: set[str] = set()
+        if m and int(m.group(2)) >= 1:
+            k = int(m.group(2)) - 1
+            below = {f"({m.group(1)}+{k})"} | ({f"({m.group(1)})"} if k == 0 else set())
         for j, raw in enumerate(lines):
             if j == store_index:
                 continue
             text = raw.strip().lower()
             if not text or text.startswith(";"):
                 continue
+            if below and any(b in text for b in below):
+                parsed = self._parse_line(text)
+                if parsed and parsed[0] == "ld":
+                    parts = split_operands(parsed[1])
+                    if len(parts) == 2 and parts[1] in below and \
+                            classify(parts[0]).kind == "r16":
+                        return True
             if target not in text:
                 continue
             parsed = self._parse_line(text)
