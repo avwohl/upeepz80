@@ -248,6 +248,7 @@ class _Code:
                 self.labels[label] = None if label in self.labels else idx
                 self.label_lines.append((label, idx))
             self.effects.append(None if op is None else effect(op, operands))
+        self._layout: tuple[list[int], list[int], list[int]] | None = None
         self._routines: _Routines | None = None
 
     def target(self, name: str | None) -> int | None:
@@ -386,6 +387,40 @@ class _Code:
                     i += 1
                 else:
                     return True
+        return False
+
+    def layout(self) -> tuple[list[int], list[int], list[int]]:
+        """Address, size and segment of every line.  A line whose size is not
+        known here (a macro, ``ds`` of a symbol, ``org``) ends a segment, and
+        distances are only measured within one."""
+        if self._layout is None:
+            addr, size, seg = [], [], []
+            a = s = 0
+            for eff in self.effects:
+                n = 0 if eff is None else eff.size
+                addr.append(a)
+                seg.append(s)
+                size.append(n or 0)
+                if n is None:
+                    s += 1
+                    a = 0
+                else:
+                    a += n
+            self._layout = (addr, size, seg)
+        return self._layout
+
+    def reaches(self, first: int, last: int, target: int, new_size: int = 2) -> bool:
+        """Can lines ``first``..``last``, replaced by one relative jump of
+        ``new_size`` bytes, reach line ``target``?  Measured on this version,
+        which only shrinks from here: every rewrite after this point makes
+        code shorter or leaves it the same length."""
+        addr, size, seg = self.layout()
+        if not (seg[first] == seg[last] == seg[target]):
+            return False
+        if target > last:
+            return addr[target] - (addr[last] + size[last]) <= 127
+        if target <= first:
+            return addr[target] - (addr[first] + new_size) >= -128
         return False
 
 
@@ -938,15 +973,17 @@ class PeepholeOptimizer:
             if did_change:
                 changed = True
 
-        # Phase 3: Convert long jumps to relative jumps where possible
-        lines = self._convert_to_relative_jumps(lines)
-
-        # Phase 4: Apply optimizations again (for DJNZ after JR conversion)
+        # Phase 3: Apply optimizations again, for what threading exposed
         lines, _ = self._optimize_pass(lines)
         lines, _ = self._optimize_z80_pass(lines)
 
-        # Phase 5: Dead store elimination at procedure entry
+        # Phase 4: Dead store elimination at procedure entry
         lines, _ = self._dead_store_elimination(lines)
+
+        # Phase 5, last because it measures distances in bytes: relative
+        # jumps and djnz where they reach.  Nothing after this may grow the
+        # code.
+        lines = self._convert_to_relative_jumps(lines)
 
         return "\n".join(lines)
 
@@ -1191,10 +1228,12 @@ class PeepholeOptimizer:
                 if 1 <= val <= 3 and op1 == "add" and arg1 == "hl,de" and \
                         dead(j, {"d", "e", "fh", "fn", "fc"}):
                     return skipped + ["\tinc hl"] * val, j, "inc_hl_const"
-                # ld de,2^k; call ??mul16 -> add hl,hl (k times).  The routine
-                # may change any register but HL, and may leave something in
-                # them; they have to be dead.
-                if val > 1 and val & (val - 1) == 0 and op1 == "call" and \
+                # ld de,2^k; call ??mul16 -> add hl,hl (k times).  Only as far
+                # as 64: beyond, the shifts are longer than the call, and no
+                # rewrite may lengthen code a relative jump already spans.
+                # The routine may change any register but HL, and may leave
+                # something in them; they have to be dead.
+                if 2 <= val <= 64 and val & (val - 1) == 0 and op1 == "call" and \
                         arg1 in _MUL16 and dead(j, _NOT_HL):
                     return skipped + ["\tadd hl,hl"] * (val.bit_length() - 1), j, "mul_strength"
                 # ld de,0; call ??subde -> (nothing): HL - 0 is HL, but the
@@ -1223,20 +1262,6 @@ class PeepholeOptimizer:
                                         j, f"{op1}_mem")
                         elif dead(j, {"a"}):
                             return skipped + [f"\t{op1} {src.text.strip()}"], j, f"{op1}_mem"
-
-        # dec b; jr/jp nz,label -> djnz label.  dec b sets S, Z, H, P/V and N
-        # and djnz sets none, so they must be dead where the loop goes back
-        # and where it falls out.
-        if opcode == "dec" and low == "b":
-            w = self._window(lines, i, 2)
-            if w is not None:
-                idxs, ins, skipped, j = w
-                parts = split_operands(ins[1][1])
-                if ins[1][0] in ("jr", "jp") and len(parts) == 2 and parts[0].lower() == "nz":
-                    t = code.target(parts[1])
-                    if t is not None and -50 < t - i < 50 and \
-                            not code.live([t, idxs[1] + 1], FLAGS_NO_C):
-                        return skipped + [f"\tdjnz {parts[1]}"], j, "djnz"
 
         # 8080-style 16-bit right shift to Z80 native:
         # or a / ld a,h / rra / ld h,a / ld a,l / rra / ld l,a -> srl h / rr l
@@ -1326,63 +1351,66 @@ class PeepholeOptimizer:
     # ---- relative jumps -----------------------------------------------------
 
     def _convert_to_relative_jumps(self, lines: list[str]) -> list[str]:
-        """Convert jp to jr where the jump is within range."""
-        # First pass: find all label positions
-        label_lines: dict[str, int] = {}
-        for i, line in enumerate(lines):
-            if self._is_label_line(line):
-                label = line.strip().split(":")[0].strip()
-                label_lines[label] = i
+        """Convert jp to jr, and dec b; jp/jr nz to djnz, where they reach.
 
-        # Second pass: convert jumps where target is close
+        Distances are counted in bytes, and a conversion is made only where
+        the displacement is known to fit.  Each conversion shortens the code,
+        which can bring more jumps in range, so this repeats until none is
+        left to convert."""
+        while True:
+            lines, changed = self._relative_jump_pass(lines)
+            if not changed:
+                return lines
+
+    def _relative_jump_pass(self, lines: list[str]) -> tuple[list[str], bool]:
+        code = _Code(lines)
         result: list[str] = []
-        for i, line in enumerate(lines):
-            parsed = self._parse_line(line)
-
-            if parsed:
-                opcode, operands = parsed
-
-                # Check for convertible jumps
-                convert_map = {
-                    "jp": ("jr", None),
-                    "jp z,": ("jr z,", 5),
-                    "jp nz,": ("jr nz,", 6),
-                    "jp c,": ("jr c,", 5),
-                    "jp nc,": ("jr nc,", 6),
-                }
-
-                for jp_prefix, (jr_prefix, prefix_len) in convert_map.items():
-                    if prefix_len:
-                        if opcode == "jp" and operands.lower().startswith(jp_prefix[3:]):
-                            # Conditional jump
-                            target = operands[prefix_len - 3:].strip()
-                            if target in label_lines:
-                                distance = label_lines[target] - i
-                                # Conservative estimate: ~40 lines is roughly 125 bytes
-                                if -40 < distance < 40:
-                                    result.append(f"\t{jr_prefix}{target}")
-                                    self.stats["jr_convert"] = self.stats.get("jr_convert", 0) + 1
-                                    break
-                    else:
-                        if opcode == "jp" and "," not in operands and operands.lower() != "(hl)":
-                            # Unconditional jp to label
-                            target = operands.strip()
-                            if target in label_lines:
-                                distance = label_lines[target] - i
-                                if -40 < distance < 40:
-                                    result.append(f"\tjr {target}")
-                                    self.stats["jr_convert"] = self.stats.get("jr_convert", 0) + 1
-                                    break
-                else:
-                    result.append(line)
-                    continue
+        changed = False
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            parsed = None if self._is_label_line(line) else self._parse_line(line)
+            if parsed is None:
+                result.append(line)
+                i += 1
                 continue
+            opcode, operands = parsed
+
+            # dec b; jp/jr nz,label -> djnz label.  dec b sets S, Z, H, P/V
+            # and N and djnz sets none, so they must be dead where the loop
+            # goes back and where it falls out.
+            if opcode == "dec" and operands.lower() == "b":
+                w = self._window(lines, i, 2)
+                if w is not None:
+                    idxs, ins, skipped, j = w
+                    parts = split_operands(ins[1][1])
+                    if ins[1][0] in ("jp", "jr") and len(parts) == 2 and parts[0].lower() == "nz":
+                        t = code.target(parts[1])
+                        if t is not None and code.reaches(idxs[0], idxs[1], t) and \
+                                not code.live([t, idxs[1] + 1], FLAGS_NO_C):
+                            result.extend(skipped)
+                            result.append(f"\tdjnz {parts[1]}")
+                            self.stats["djnz"] = self.stats.get("djnz", 0) + 1
+                            changed = True
+                            i = j
+                            continue
+
+            if opcode == "jp":
+                parts = split_operands(operands)
+                cond = parts[0].lower() if len(parts) == 2 else None
+                target = parts[-1] if parts else ""
+                if (cond is None or cond in JR_CONDITIONS) and len(parts) in (1, 2):
+                    t = code.target(target)
+                    if t is not None and code.reaches(i, i, t):
+                        result.append(f"\tjr {cond},{target}" if cond else f"\tjr {target}")
+                        self.stats["jr_convert"] = self.stats.get("jr_convert", 0) + 1
+                        changed = True
+                        i += 1
+                        continue
 
             result.append(line)
-
-        return result
-
-    # ---- jump threading -----------------------------------------------------
+            i += 1
+        return result, changed
 
     def _jump_threading_pass(self, lines: list[str]) -> tuple[list[str], bool]:
         """
@@ -1392,6 +1420,7 @@ class PeepholeOptimizer:
         thread through to the final destination.
         """
         changed = False
+        code = _Code(lines)
 
         # Build map of label -> (line index, first instruction after label)
         label_info: dict[str, tuple[int, str | None]] = {}
@@ -1452,8 +1481,17 @@ class PeepholeOptimizer:
                     target = operands.strip()
                     prefix = ""
 
-                # Thread through for unconditional jumps only
-                if parsed[0] in ("jp", "jr") and not prefix and target in label_target:
+                # Thread through for unconditional jumps only.  A jr has to
+                # reach its new target; if it may not, it stays as it is
+                # (making it a jp would lengthen code other relative jumps
+                # already span).
+                if parsed[0] == "jr" and not prefix and target in label_target and \
+                        (code.target(label_target[target]) is None or
+                         not code.reaches(i, i, code.target(label_target[target]))):
+                    result.append(line)
+                    if target in label_refs:
+                        label_refs[target] += 1
+                elif parsed[0] in ("jp", "jr") and not prefix and target in label_target:
                     new_target = label_target[target]
                     if parsed[0] == "jp":
                         result.append(f"\tjp {new_target}")
