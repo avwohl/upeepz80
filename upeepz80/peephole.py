@@ -1276,6 +1276,18 @@ class PeepholeOptimizer:
                 # takes it off the stack has to be called.
                 if pattern.name == "tail_call" and code.moves_return(instrs[0][1]):
                     continue
+                # And the callee finds its own return address on top of the
+                # stack only where nothing is pushed since this routine was
+                # entered, and the routine has not moved its own.  A callee
+                # that removes the arguments pushed for it (PL/M-80's
+                # convention, whether or not it is in this text) would take
+                # the return address for one of them.  Code nothing reaches -
+                # a routine never called - may be rewritten as it likes.
+                if pattern.name == "tail_call":
+                    r = code.routines
+                    at = instruction_lines[0]
+                    if (r.open[at] or r.entries[at]) and (r.height[at] != 0 or r.wild[at]):
+                        continue
 
                 # Pattern matched!
                 self.stats[pattern.name] = self.stats.get(pattern.name, 0) + 1

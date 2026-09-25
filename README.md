@@ -120,6 +120,12 @@ everything: a call or jump to a label defined elsewhere, `call 5`, `jp 0`,
 another module may call (`public`, `NAME::`, or its address taken), or that
 takes its return address off the stack (`ex (sp),hl / ret`).
 
+`call x / ret` becomes `jp x` only where nothing is pushed since the routine
+was entered, and the routine has not moved its own return address. Jumped
+to, `x` finds on top of the stack what `call x` would have put under its
+return address. That matters to a callee that removes the arguments pushed
+for it, as under PL/M-80's calling convention, which uplm80 0.4.0 uses.
+
 Numbers are read under the text's radix. Where it sets a `.radix` other than
 ten, only numbers that mean the same under any radix are rewritten.
 

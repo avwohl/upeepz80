@@ -3,6 +3,31 @@
 Notable changes to upeepz80. Releases up to 0.2.4 are described on the
 [GitHub releases page](https://github.com/avwohl/upeepz80/releases).
 
+## 0.2.6 - unreleased
+
+### Fixed
+
+- **`push … / call x / ret` became `push … / jp x`.** Jumped to, `x` finds
+  its caller's return address where the pushed word should be, and the
+  pushed word where its own return address should be. That is wrong
+  wherever `x` removes the words pushed for it, as a routine written to
+  PL/M-80's calling convention does: its first arguments are pushed, the
+  last two are in BC and DE, and the callee takes the pushed ones off the
+  stack. uplm80 0.4.0 calls that way, so where a procedure ended in `CALL
+  p(a, b, c)`, p took the return address for `a` and returned to the
+  address `a` held. 0.2.5 declined the tail call only where `x` was a
+  routine of this text that moves its return address; `x` is often in
+  another module, or reached through `jp (hl)`, and a routine of this text
+  that removes its arguments only at its exit is not seen to.
+
+  `call x / ret` now becomes `jp x` only where the stack height since the
+  routine was entered is known to be 0, and the routine has not moved its
+  own return address. A callee outside the text can only make the counted
+  height too high, never too low, so a count of 0 is exact. Code that
+  nothing reaches, such as a routine never called, is exempt. On uplm80
+  0.3.7's output for the MP/M II and 80un sources this loses one tail call
+  of 456.
+
 ## 0.2.5 - 2026-09-25
 
 A rewrite that changes what a register or flag holds afterwards is now made
