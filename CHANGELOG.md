@@ -75,12 +75,17 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   may have made the pointer and kept it (`ld (W),sp`), or a routine it
   calls may use it on the caller's return address. Where the text makes
   no such pointer, nothing changes.
-- **`call x / ret` became `jp x` for a routine that reads what is above
-  its return address.** 0.2.5 listed this as a known issue too. `RD: ld
-  hl,4 / add hl,sp / ld a,(hl)` reads the word pushed before its caller
-  was called. Jumped to, it finds one return address fewer on the stack,
-  and reads another word. No tail call is now made to a routine that
-  makes a pointer from SP, or that calls one that does.
+- **`call x / ret` became `jp x` for a routine that reads its return
+  address, or what is above it.** 0.2.5 listed this as a known issue too.
+  `RD: ld hl,4 / add hl,sp / ld a,(hl)` reads the word pushed before its
+  caller was called. Jumped to, it finds one return address fewer on the
+  stack, and reads another word. A routine can also read through a
+  pointer that its caller made before the call: after `W: ld hl,0 / add
+  hl,sp / dec hl / dec hl`, HL points where `call RB` puts RB's return
+  address, which `RB: ld a,(hl)` reads, and `jp RB` puts none there. No
+  tail call is now made to a routine that makes a pointer from SP, or,
+  where the text makes one anywhere, that reads through a pointer; nor to
+  a routine that calls one of those.
 
   Together these two cost 85 bytes on the corpus, in nine outputs: 30 `ld
   a,0` → `xor a`, 22 tail calls, 18 `cp 0` → `or a`, 7 relative jumps, 4
@@ -99,8 +104,8 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
 - `tests/test_liveness.py` and `tests/test_control_flow.py`: a pushed
   value read, and a return address changed, through a pointer made from
   SP, three ways each, a store between `push af` and `pop af`, and the
-  tail call above. Each runs the code before and after optimization, and
-  fails on 0.2.5.
+  tail calls above, three ways. Each runs the code before and after
+  optimization, and fails on 0.2.5.
 - `tests/peepfuzz.py`: half the programs now also call a routine that
   stores its parameter at its entry, between two neighbours in storage the
   program defines, and then read the byte or not, by its own name or from

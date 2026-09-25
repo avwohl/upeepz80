@@ -236,10 +236,12 @@ class _Routines:
     code that writes through a pointer, or calls code that does, may write
     another return address over its own (``ld (hl),e``): it is wild too,
     though it comes back as high on the stack as it went.  Code that makes
-    such a pointer, or calls code that does, may read what is above its
-    return address, which a tail call changes: it ``peeks``.  A pointer
-    into the stack is taken to come from this text, or from a module that
-    calls it, which does not reach below the SP it calls with.
+    such a pointer, or reads through a pointer (which its caller may have
+    made before the call), or calls code that does either, may read its
+    return address or what is above it, which a tail call changes: it
+    ``peeks``.  A pointer into the stack is taken to come from this text,
+    or from a module that calls it, which does not reach below the SP it
+    calls with.
     """
 
     def __init__(self, code: "_Code"):
@@ -325,9 +327,10 @@ class _Routines:
             unbalanced |= more
         self.height: list[int | None] = height
         self.irregular = irregular
-        # Pointers made from SP: code that makes one, or calls code that
-        # does, peeks; where the text makes one anywhere, code that writes
-        # through a pointer, or calls code that does, is wild.
+        # Pointers made from SP: code that makes one peeks.  Where the text
+        # makes one anywhere, code that reads through a pointer, which its
+        # caller may have made, peeks too, and code that writes through one
+        # is wild.  Code that calls code that peeks, or is wild, is so too.
         callees = {root: {code.target(effects[i].target) for i in reach[root]
                           if effects[i] is not None and effects[i].flow == "call"}
                    for root in roots}
@@ -343,7 +346,9 @@ class _Routines:
             return found
 
         self.peeks = closed_over_calls(
-            {root for root in roots if any(code.stack_pointers[i] for i in reach[root])})
+            {root for root in roots
+             if any(code.stack_pointers[i] or (code.stack_pointer and code.pointer_reads[i])
+                    for i in reach[root])})
         writes: set[int] = set()
         if code.stack_pointer:
             writes = closed_over_calls(

@@ -116,6 +116,22 @@ def test_no_tail_call_to_a_routine_that_reads_above_its_return_address():
     assert "call RD" in instrs(out)
 
 
+@pytest.mark.parametrize("src", [
+    # W points HL where `call RB' puts RB's return address, and RB reads it.
+    ("\tcall W\n\tret\nW:\n\tld hl,0\n\tadd hl,sp\n\tdec hl\n\tdec hl\n\tcall RB\n\tret\n"
+     "RB:\n\tld a,(hl)\n\tret\n"),
+    # W keeps the pointer; RB reads the high byte through it.
+    ("\tcall W\n\tret\nW:\n\tld (PTR),sp\n\tcall RB\n\tret\n"
+     "RB:\n\tld hl,(PTR)\n\tdec hl\n\tld a,(hl)\n\tret\n\tdseg\nPTR:\tds 2\n"),
+])
+def test_no_tail_call_to_a_routine_that_reads_through_its_callers_pointer(src):
+    """RB makes no pointer from SP, but reads through one its caller made
+    before the call, where RB's return address is.  `call RB / ret' as
+    `jp RB' puts none there, and RB reads what was below the stack."""
+    out = assert_equivalent(src)
+    assert "call RB" in instrs(out)
+
+
 def test_a_routine_that_writes_through_a_pointer_where_none_is_made_from_sp():
     """Where the text makes no pointer from SP, a write through a pointer
     does not reach a return address, and P's `ret' goes back to its call."""
