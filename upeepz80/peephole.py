@@ -269,9 +269,9 @@ class _Routines:
     something names is.
 
     Where code goes on like that with something of its own on the stack -
-    a height other than 0 or not known, or other than 1 at a ``ret`` to
-    what it pushed (``push bc / ld hl,HND / jp (hl)``, ``push bc / push hl
-    / ret``) - the code it goes to finds that on the stack, where the
+    a height above 0 or not known, or above 1 at a ``ret`` to what it
+    pushed (``push bc / ld hl,HND / jp (hl)``, ``push bc / push hl /
+    ret``) - the code it goes to finds that on the stack, where the
     height counted from its label, 0, says nothing is.  It may be any code
     entered from anywhere: where the text has such a jump, ``enters_pushed``
     is set, and :meth:`pushed` holds for all of that code.  (A ``ret``

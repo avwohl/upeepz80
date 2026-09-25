@@ -5,6 +5,13 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
 
 ## Unreleased
 
+The corpus below is what uplm80 0.3.7 (its release branch at 0a25af2)
+makes of the MP/M II and 80un PL/M sources at `-O2`: 87 texts, of which 77
+assemble. On it this release's code is 184 bytes larger than 0.2.5's,
+213,253 against 213,069, in 25 outputs. Without uplm80's `EQU` (below) it
+is the same, and 0.2.5's is 213,063. `optimize()` takes about as long as
+0.2.5's: 15% more CPU time over the seven largest texts.
+
 ### Fixed
 
 - **Dead-store elimination removed a store that an address computed from
@@ -43,7 +50,7 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
 
   On MP/M II and 80un at `-O2`, this keeps 17 of the 28 stores that 0.2.5
   removed with uplm80 0.3.7. The 77 outputs that assemble grow by 45
-  bytes, from 213,017 to 213,062. Without uplm80's `EQU`, it keeps 19 of
+  bytes, from 213,069 to 213,114. Without uplm80's `EQU`, it keeps 19 of
   30, and the code is the same as with it.
 - **Dead-store elimination removed a store after a line of data that ends
   with a comma,** though a load reads it. It takes a byte's offset from the
@@ -149,7 +156,10 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   callee outside the text can only make the counted height too high,
   never too low, so a count of 0 is exact - where the routine was entered
   by a `call` (see below). Code that nothing reaches, such as a routine
-  never called, is exempt. On the corpus this costs one byte, in LOAD.PLM.
+  never called, is exempt. On the corpus this costs two bytes, a tail call
+  in LOAD.PLM, where something is pushed, and one in DM.PLM, whose routine
+  writes through a pointer where the text makes one from SP; and one in
+  80un's `io.plm`, which does not assemble.
 - **A routine that goes on to code that changes its caller's return
   address was taken to come back to its call, where the optimizer does
   not follow the way.** 0.2.5 did the same. In `QQ: ld hl,RTN / call DSP
@@ -188,21 +198,25 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   than that is on the stack (`push bc / ld hl,HND / push hl / ret`), and
   with `push bc / jp $+3`, where the line after the jump counted as
   reached by nothing. Now, where code goes where the optimizer cannot
-  follow with something of its own on the stack - a height other than 0,
-  or not known; other than 1 at a `ret` - no tail call is made in code
-  that a label something names, or anything but a `call`, may enter. The
-  line after an instruction that uses `$` is taken to be entered so.
-  Nothing changes on the corpus: its only such jumps are the `jp (hl)` of
-  PIP's `DO CASE`, made with nothing pushed.
+  follow with something of its own on the stack - a height above 0, or
+  not known; above 1 at a `ret` - no tail call is made in code that a
+  label something names, or anything but a `call`, may enter. The line
+  after an instruction that uses `$` is taken to be entered so. Nothing
+  changes on the corpus: PIP's `DO CASE` goes through `jp (hl)` with
+  nothing pushed, and only MPMLDR goes on so, at a `halt` where the
+  height is not known, with no tail call in code entered so.
 
 ### Added
 
 - `tests/test_storage.py`: the program above, run before and after
-  optimization, each way to a byte from a neighbour's address, and each
-  way control gets to data that code patches. 44 of its 68 tests fail on
-  0.2.5. `tests/z80sim.py` now lays out the data a text defines as an
-  assembler does, so that `ld hl,A+1` finds the byte after A, and reads
-  M80's `LOW A` and `HIGH A`.
+  optimization, each way to a byte from a neighbour's address, each way
+  control gets to data that code patches, and a store after each line of
+  data above that ends with a comma, or holds `'A'+'B'`. 56 of its 81
+  tests fail on 0.2.5. `tests/z80sim.py` now lays out the data a text
+  defines as um80 does, apart from the optimizer's sizes, so that `ld
+  hl,A+1` finds the byte after A, and reads M80's `LOW A` and `HIGH A`.
+  `tests/test_z80_model.py`: the size of each line of data above, where
+  it is known, is um80's.
 - `tests/test_liveness.py` and `tests/test_control_flow.py`: a pushed
   value read, and a return address changed, through a pointer made from
   SP, three ways each, a store between `push af` and `pop af`, and the
@@ -211,9 +225,14 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   name in lower case, an equate, `jp (hl)`, `jp (ix)`, `jp (iy)` and `push
   hl / ret`; those to a routine that goes on to code that pops what its
   caller pushed, or reads through its caller's pointer; the tail call to
-  SHOWP; and QQ's `ld a,0` above, three ways. Eleven more ways for a
-  routine to go where the optimizer cannot follow each keep the call.
-  `tests/z80sim.py` now jumps to a name an equate sets to a label.
+  SHOWP, and to SHOWP after each jump not followed above; to CALLER, four
+  ways; to P3 and PX, and through `??jphl`, under PL/M-80's convention;
+  and QQ's `ld a,0` above, three ways. Eleven more ways for a routine to
+  go where the optimizer cannot follow each keep the call. 45 of the 66
+  tests of `tests/test_control_flow.py` fail on 0.2.5, and 4 of the 54 of
+  `tests/test_liveness.py`. `tests/z80sim.py` now jumps to a name an
+  equate sets to a label, and `tests/_equiv.py`'s `assert_equivalent`
+  runs code of another module (`other`) with the text.
 - `tests/peepfuzz.py`: half the programs now also call a routine that
   stores its parameter at its entry, between two neighbours in storage the
   program defines, and then read the byte or not, by its own name or from
@@ -246,8 +265,8 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   hl / call RB / ret` with `RB: call EXT / ld a,1 / ret` still becomes `jp
   RB`, and EXT reads its own return address through HL, not RB's. Taking
   every routine that calls out of the text, where the text makes such a
-  pointer, to read above its return address costs 16 bytes in four outputs
-  of the corpus.
+  pointer, to read above its return address would cost one byte on the
+  corpus, in DM.PLM.
 - **A `ret` where the stack height is not known, or from a routine that
   may have changed its return address, is taken to go back to a call.**
   It may go to a label with what its routine's caller pushed still on the
