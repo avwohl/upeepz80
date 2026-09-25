@@ -731,7 +731,9 @@ class _Storage:
       label of the run (itself, through a name an ``equ`` sets to it, or
       as ``$`` there) as a value - not as the address of a load or a
       store, nor as where a jump or call goes.  A label on an instruction,
-      or right before one, is the address where the run before it ends;
+      or right before one, is the address where the run before it ends.
+      ``$`` in an instruction is where it starts, and gives an address in
+      the runs on both sides of it (``jp $+3``);
     - from another module, through a label of the run that the text
       exports (``public``, ``NAME::``) or names in an ``extrn``;
     - from the processor: a ``call`` or ``rst`` pushes the address of what
@@ -739,7 +741,19 @@ class _Storage:
       which points into a run only if the text loads it from an address
       there.
 
-    A run none of these gives an address in is *closed*.
+    Data may also be run as code (``OPC: db 0``, which code patches).
+    Control gets to a run's data, as it does to any byte, from the
+    instruction before it, by a jump, call or return to an address in it,
+    or by the start of the program.  The text shows the first two: an
+    instruction that may go on to the next (all but ``jp``, ``jr``,
+    ``ret``, ``reti``, ``retn`` and ``jp (hl)`` that always go elsewhere),
+    and a jump or call to a label of the run that lies in its data - not
+    where the run ends.  A return, and a jump elsewhere to an address in
+    the run, need that address.  And the start of the program comes before
+    anything is stored.
+
+    A run none of these gives an address in, and control does not go on
+    or jump into, is *closed*.
 
     Claim: if a byte X lies in a ``ds``, ``db`` or ``dw`` of a closed run,
     of a segment the text does not place, and no load in the text whose
@@ -748,8 +762,10 @@ class _Storage:
     has to be computed from an address in X's run (1, 2); there is none.
     A read at an address a text gives reads X only if the address is in
     X's run (1, 2).  In this text those are the loads examined; another
-    module has no name for anything in the run.  And X is not fetched as
-    an instruction (2).  So the value stored at X is never read.
+    module has no name for anything in the run.  An instruction is fetched
+    from X only if control gets to X's run, which it does neither from the
+    instruction before it nor by a jump or call the text shows, and has no
+    address to go to (1, 2).  So the value stored at X is never read.
 
     Loads are compared by the bytes they read: ``(A+k)``, with A's offset
     in the run known, reads A+k, and A+k+1 as well for a register pair.  A
@@ -860,13 +876,17 @@ class _Storage:
             target = eff.target if eff.flow in ("jump", "branch", "call") else None
             for part in parts:
                 if target is not None and part.strip() == target and _NAME.fullmatch(target):
-                    continue  # where control goes, not a value
+                    uses.append(("goto", part, here))  # where control goes, not a value
+                    continue
                 uses.append(("escape", part, here))
-            # The next run starts after this instruction, and a call's
-            # return address is its start.
+            # The next run starts after this instruction.  Control goes on
+            # into it unless the instruction always goes elsewhere; a call
+            # returns to it; and `$' is where the instruction starts, from
+            # which the address after it is computed.
             run[seg] += 1
             off[seg] = 0
-            if op in ("call", "rst"):
+            if not (eff.flow == "jump" or (eff.flow == "return" and not eff.cond) or
+                    (eff.flow == "stop" and op != "halt")) or "$" in _names(operands):
                 self.escaped.add((seg, run[seg]))
         if not self.ok:
             return
@@ -885,6 +905,15 @@ class _Storage:
             got = self._place(text, here)
             if kind == "escape":
                 self.escaped |= self._runs(got)
+            elif kind == "goto":
+                # Control goes there: into the run's data, unless the label
+                # is where the run ends.
+                if got is not None and got[0] == "at":
+                    seg_, run_, o = got[1]
+                    if o is None or any(a <= o < b for a, b in self.spans.get((seg_, run_), ())):
+                        self.escaped.add((seg_, run_))
+                else:
+                    self.escaped |= self._runs(got)
             elif got is not None and got[0] == "at" and got[1][2] is not None:
                 seg_, run_, o = got[1]
                 width = 2 if kind == "read2" else 1

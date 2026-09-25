@@ -21,19 +21,24 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   - The byte is in the data (`ds`, `db`, `dw`) between two instructions of
     a segment. The segment is `cseg` or `dseg`, and the text does not place
     it with `org` or `.phase`.
-  - No operand, `db`, `dw` or `equ` uses a label of that data as a value.
-    Nothing exports such a label. No `call` or `rst` comes right before
-    the data, whose return address would point there. SP is not loaded
-    from it.
+  - No operand, `db`, `dw` or `equ` uses a label of that data as a value,
+    and neither does `$` in the instruction before it (`jp $+3`). Nothing
+    exports such a label. SP is not loaded from it.
+  - The data is not run as code, as it is where code patches an
+    instruction (`OPC: db 0`). No jump or call goes to a label in the
+    data. The instruction before it is a `jp`, `jr`, `ret`, `reti`,
+    `retn` or `jp (hl)` with no condition, so control does not go on into
+    the data. A `call` or `rst` there would return into it.
   - No load reads the byte. `ld a,(PA+1)`, and `ld hl,(PA)`, which reads
     the byte after PA too, read PB where PB is PA+1.
 
-  The reasons, and what they assume, are in the docstring of `_Storage`
-  in `upeepz80/peephole.py`. In short: a program cannot depend on where
-  the linker puts a segment, or on the size of code, which the optimizer
-  changes. No store is removed from a text that has a conditional, a
-  macro, an `include`, a name defined twice or an instruction the
-  optimizer does not know.
+  0.2.5 also removed a store to data that the code before it goes on
+  into (`RUN: nop / OPC: db 0`). The reasons, and what they assume, are
+  in the docstring of `_Storage` in `upeepz80/peephole.py`. In short: a
+  program cannot depend on where the linker puts a segment, or on the
+  size of code, which the optimizer changes. No store is removed from a
+  text that has a conditional, a macro, an `include`, a name defined
+  twice or an instruction the optimizer does not know.
 
   On MP/M II and 80un at `-O2`, this keeps 17 of the 28 stores that 0.2.5
   removed with uplm80 0.3.7. The 77 outputs that assemble grow by 45
@@ -85,10 +90,10 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
 ### Added
 
 - `tests/test_storage.py`: the program above, run before and after
-  optimization, and each way to a byte from a neighbour's address. 32 of
-  its 40 tests fail on 0.2.5. `tests/z80sim.py` now lays out the data a
-  text defines as an assembler does, so that `ld hl,A+1` finds the byte
-  after A.
+  optimization, each way to a byte from a neighbour's address, and each
+  way control gets to data that code patches. 39 of its 61 tests fail on
+  0.2.5. `tests/z80sim.py` now lays out the data a text defines as an
+  assembler does, so that `ld hl,A+1` finds the byte after A.
 - `tests/test_liveness.py` and `tests/test_control_flow.py`: a pushed
   value read, and a return address changed, through a pointer made from
   SP, three ways each, a store between `push af` and `pop af`, and the

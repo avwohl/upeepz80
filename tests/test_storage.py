@@ -191,6 +191,56 @@ def test_a_call_followed_by_code_gives_no_address_in_the_data():
     assert "(SLOT),a" in optimize(src)
 
 
+# ---- data run as code ------------------------------------------------------------
+
+def patched(way: str, before: str) -> str:
+    """SETOP stores A in OPC, a byte of data among the code, as code that
+    patches an instruction does; ``way`` then goes there, and ``before``
+    is the code before the data."""
+    return ("\tld a,0C9h\n\tcall SETOP\n" + way + "\tjp 0\nSETOP:\n\tld (OPC),a\n\tret\n" +
+            before + "OPC:\tdb 0\n\tld a,1\n\tret\n")
+
+
+@pytest.mark.parametrize("way,before", [
+    # A jump or call to the data's label.
+    ("\tcall OPC\n", "\tret\n"),
+    ("\tjp OPC\n", "\tret\n"),
+    ("\tjr OPC\n", "\tret\n"),
+    ("\tdjnz OPC\n", "\tret\n"),
+    ("\tjp z,OPC\n", "\tret\n"),
+    ("\tjr nc,OPC\n", "\tret\n"),
+    ("\tcall nz,OPC\n", "\tret\n"),
+    ("\tjp OPC2\n", "\tret\nOPC2\tequ $\n"),
+    # To `$' and past it.
+    ("\tcall RUN\n", "\tret\nRUN:\n\tjp $+3\n"),
+    # The code before the data goes on into it.
+    ("\tcall RUN\n", "RUN:\n\tnop\n"),
+    ("\tcall RUN\n", "RUN:\n\tret z\n"),
+    ("\tcall RUN\n", "RUN:\n\tjp nz,0\n"),
+    ("\tcall RUN\n", "RUN:\n\tjr c,RUN\n"),
+    ("\tcall RUN\n", "RUN:\n\tdjnz RUN\n"),
+    ("\tcall RUN\n", "RUN:\n\thalt\n"),  # an interrupt returns after it
+])
+def test_a_store_to_data_that_is_run_as_code_is_kept(way, before):
+    """The byte is an instruction when control gets there: it is read."""
+    src = patched(way, before)
+    assert "ld (OPC),a" in instrs(optimize(src)), src
+
+
+@pytest.mark.parametrize("way,before", [
+    ("", "\tret\n"),
+    ("", "\tjp 0\n"),
+    ("", "\tjr SETOP\n"),
+    ("", "\tjp (hl)\n"),
+    ("", "\treti\n"),
+    # A jump past the data runs the code after it.
+    ("\tcall PAST\n", "\tret\n"),
+])
+def test_a_store_to_data_control_does_not_reach_still_goes(way, before):
+    src = patched(way, before).replace("\tld a,1\n", "PAST:\n\tld a,1\n")
+    assert "ld (OPC),a" not in instrs(optimize(src)), src
+
+
 def test_nothing_is_dead_where_the_text_is_not_all_there():
     """A conditional, a macro, an include, a name defined twice or an
     instruction the optimizer does not know: the layout is not known."""
