@@ -54,6 +54,8 @@ def test_low_of_a_constant_stored_as_address():
 
 # ---- the rest of the audit -------------------------------------------------------
 
+_T = "T:\n\tjp c,Y\n\tld a,1\n\tret\nY:\n\tld a,2\n\tret\n"
+
 @pytest.mark.parametrize("src", [
     # ld a,0 -> xor a clears the carry rla, adc and jp c read
     "\tscf\n\tld a,0\n\trla\n\tret\n",
@@ -113,6 +115,19 @@ def test_low_of_a_constant_stored_as_address():
     # a rewrite starting at a label with an instruction after it kept the
     # instruction and lost the label
     "\tjp L1\nL0:\tld a,0\n\tret\nL1:\tld a,5\n\tjp L0\n",
+    # a routine that swaps its return address for HL returns to HL, not to
+    # the call; the code there reads the carry `xor a' would clear.  (T
+    # comes before what may shrink: the interpreter's addresses are lines.)
+    "\tscf\n\tld hl,T\n\tld a,0\n\tcall P\n\tor a\n\tret\n" + _T + "P:\n\tex (sp),hl\n\tret\n",
+    # ... or pops it and pushes another
+    "\tscf\n\tld de,T\n\tld a,0\n\tcall P\n\tor a\n\tret\n" + _T + "P:\n\tpop hl\n\tpush de\n\tret\n",
+    # ... also when it does so after a push and pop of its own, or through
+    # a jump into it
+    "\tscf\n\tld de,T\n\tld a,0\n\tcall P\n\tor a\n\tret\n" + _T +
+    "P:\n\tpush bc\n\tpop bc\n\tjp P2\nP2:\n\tpop hl\n\tpush de\n\tret\n",
+    # ... and its caller, which then returns where the stack says, too
+    "\tscf\n\tld de,T\n\tld a,0\n\tcall Q\n\tor a\n\tret\n" + _T +
+    "Q:\n\tcall P\n\tret\nP:\n\tpop hl\n\tpop bc\n\tpush de\n\tpush hl\n\tret\n",
 ])
 def test_every_rewrite_keeps_what_is_read(src):
     assert_equivalent(src)

@@ -328,7 +328,8 @@ class Gen:
             close = g.choice([["dec b", f"jp nz,{top}"], ["dec b", f"jr nz,{top}"], [f"djnz {top}"]])
             return [f"ld b,{g.randrange(1, 5)}", f"{top}:"] + body + close
         if k < 0.97 and allow_b:
-            call = [g.choice(["call ??S1", f"call {g.choice(CC)},??S1", "call ??S2", "call ??S2"])]
+            call = [g.choice(["call ??S1", f"call {g.choice(CC)},??S1", "call ??S2", "call ??S2",
+                              "call ??S4"])]
             r = g.random()
             if r < 0.3:
                 # read what the routine leaves in the flags
@@ -340,6 +341,9 @@ class Gen:
                 # a routine entered by a jump, returning to an address pushed
                 back = self.label()
                 call = [f"ld hl,{back}", "push hl", f"ld hl,{self.word()}", "jp ??S3", f"{back}:"]
+            if call[0] == "call ??S4":
+                # something to rewrite whose liveness depends on where it returns
+                call = self.seed(allow_b) + call
             return call
         if self.pending:
             return [f"{self.pending.pop(g.randrange(len(self.pending)))}:"]
@@ -355,6 +359,12 @@ class Gen:
         for lab in self.pending:
             out.append(f"{lab}:")
         self.pending = []
+        # where ??S4 returns to, in place of its caller: after every call of
+        # it, so that no program loops.  Read what it left there.
+        out += ["??BACK:", g.choice(["adc a,0", "sbc a,a", "rla", "ld (V0),hl", "ld (V1),de",
+                                     "push af", "sbc hl,de", "daa", "ld (V2),a"])]
+        if out[-1] == "push af":
+            out += ["pop hl"]
         # a thread of jumps, and a label after an unconditional return
         if g.random() < 0.5:
             a, b = self.label(), self.label()
@@ -392,6 +402,24 @@ class Gen:
             # ??S2 may be exported, and so entered from outside as well
             colon = "::" if name == "??S2" and g.random() < 0.3 else ":"
             subs += [f"{name}{colon}"] + body + ["ret"]
+        # ??S4 returns to ??BACK in place of its caller, having swapped the
+        # return address (the copy of the old one is then overwritten: code
+        # addresses differ once optimized).
+        body = []
+        for _ in range(g.randrange(0, 3)):
+            body += self.seed(allow_b=True) if g.random() < 0.5 else self.instr()
+        swap = g.choice([["ld hl,??BACK", "ex (sp),hl", f"ld hl,{self.word()}"],
+                         ["pop de", "ld de,??BACK", "push de", f"ld de,{self.word()}"],
+                         ["push bc", "pop bc", "pop hl", "ld hl,??BACK", "push hl", f"ld hl,{self.word()}"]])
+        if g.random() < 0.3:
+            swap = ["jp ??S4B", "??S4B:"] + swap
+        body += swap
+        for _ in range(g.randrange(0, 3)):
+            body += self.plain()
+        body += [g.choice(["cp b", "or a", "inc a", "scf", "nop", "nop", "nop"])]
+        body += [f"{lab}:" for lab in self.pending]
+        self.pending = []
+        subs += ["??S4:"] + body + ["ret"]
         text = []
         for line in out + subs:
             text.append(line if line.endswith(":") else "\t" + line)

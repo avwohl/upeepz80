@@ -125,6 +125,16 @@ class _Routines:
 
     ``height`` is the number of pushes outstanding since the routine was
     entered, where every way to a line agrees on it, else None.
+
+    Code that takes its return address off the stack - a ``pop`` or ``ex
+    (sp),rr`` where nothing of its own is pushed - may put another in its
+    place, or none (``pop hl / push de / ret``, ``ex (sp),hl / ret``).  Its
+    ``ret`` goes anywhere: ``wild`` is set for all the code that can be
+    reached from where it was entered.  (Where the height is not known, a
+    ``ret`` goes anywhere anyway.)  Such a routine, and one with a ``ret``
+    where the height is not known, may come back to its call with the stack
+    as it pleases: they are ``irregular``, and the height after a call of
+    one is not known.
     """
 
     def __init__(self, code: "_Code"):
@@ -175,6 +185,7 @@ class _Routines:
         self.open = [False] * (n + 1)
         self.entries: list[set[int]] = [set() for _ in range(n + 1)]
         roots = sorted(open_roots | set(self.calls))
+        reach: dict[int, set[int]] = {}
         for root in roots:
             is_open = root in open_roots
             stack = [root]
@@ -189,8 +200,37 @@ class _Routines:
                 else:
                     self.entries[i].add(root)
                 stack.extend(successors(i))
+            reach[root] = reached
 
-        # Stack heights: 0 where a routine (or anything else) is entered.
+        # Routines that move their return address or return at a height not
+        # known, and the heights, which are unknown after a call of one:
+        # each can make more of the other.
+        unbalanced: set[int] = set()
+        callees = set(self.calls)
+        while True:
+            height = self._heights(code, roots, successors, unbalanced)
+            wild = {root for root in roots
+                    if any(self._moves_return(code, i, height[i]) for i in reach[root])}
+            irregular = wild | {root for root in roots
+                                if any(height[i] is None and effects[i] is not None and
+                                       effects[i].flow == "return" for i in reach[root])}
+            more = (irregular & callees) - unbalanced
+            if not more:
+                break
+            unbalanced |= more
+        self.height: list[int | None] = height
+        self.irregular = irregular
+        self.wild = [False] * (n + 1)
+        for root in wild:
+            for i in reach[root]:
+                self.wild[i] = True
+
+    @staticmethod
+    def _heights(code: "_Code", roots: list[int], successors: Callable[[int], list[int]],
+                 unbalanced: set[int]) -> list[int | None]:
+        """Stack heights: 0 where a routine (or anything else) is entered."""
+        effects = code.effects
+        n = len(effects)
         unset = object()
         height: list = [unset] * (n + 1)
         work = []
@@ -206,6 +246,8 @@ class _Routines:
                 after = h
             elif eff.stack is None:
                 after = None
+            elif eff.flow == "call" and code.target(eff.target) in unbalanced:
+                after = None
             else:
                 after = h + eff.stack
             for j in successors(i):
@@ -219,11 +261,20 @@ class _Routines:
                 else:
                     height[j] = None  # two ways in disagree
                 work.append(j)
-        self.height: list[int | None] = [None if h is unset else h for h in height]
+        return [None if h is unset else h for h in height]
+
+    @staticmethod
+    def _moves_return(code: "_Code", i: int, h: int | None) -> bool:
+        """Does line ``i``, at stack height ``h``, take the return address
+        (or what is under it) off the stack?"""
+        eff = code.effects[i]
+        if h is None or eff is None or eff.flow != "next" or "sp" not in eff.reads:
+            return False
+        return h <= 0 and (eff.stack == -1 or (eff.stack == 0 and _split(code.lines[i])[1] == "ex"))
 
     def continuations(self, i: int) -> list[int] | None:
         """The lines a ``ret`` at line ``i`` may return to, or None if any."""
-        if self.open[i] or not self.entries[i]:
+        if self.open[i] or self.wild[i] or not self.entries[i]:
             return None
         out: list[int] = []
         for root in self.entries[i]:
@@ -367,7 +418,7 @@ class _Code:
                 if eff.flow == "return":
                     if eff.cond:
                         work.append((i + 1, need, frames))
-                    if h != 0:
+                    if h != 0 or routines.wild[i]:
                         return True
                     # This routine's slots are below SP now.
                     need = frozenset(x for x in need if not (type(x) is tuple and x[0] == depth))
@@ -402,6 +453,13 @@ class _Code:
                 else:
                     return True
         return False
+
+    def moves_return(self, name: str) -> bool:
+        """Is ``name`` a routine of this text that may move its return
+        address (or what the stack holds under it), or return at a stack
+        height not known?"""
+        t = self.target(name.strip())
+        return t is not None and (t in self.routines.irregular or self.routines.wild[t])
 
     def layout(self) -> tuple[list[int], list[int], list[int]]:
         """Address, size and segment of every line.  A line whose size is not
@@ -1141,6 +1199,11 @@ class PeepholeOptimizer:
                 if pattern.condition and not pattern.condition(instrs):
                     continue
                 if not self._clobbers_dead(code, pattern, instrs, instruction_lines):
+                    continue
+                # Jumped to, a routine finds its caller's return address
+                # where it looked for its own.  One of this text's that
+                # takes it off the stack has to be called.
+                if pattern.name == "tail_call" and code.moves_return(instrs[0][1]):
                     continue
 
                 # Pattern matched!

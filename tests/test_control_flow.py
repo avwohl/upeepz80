@@ -66,3 +66,19 @@ def test_a_label_exported_with_double_colon_is_kept():
     src = "\tld a,1\n\tjp L2\nbar::\n\tjp L2\nL2:\tret\n"
     out = assert_equivalent(src, entry="\tld a,7\n\tcall bar\n\tjp 0\n")
     assert "bar::" in out.split("\n"), out
+
+
+def test_no_tail_call_to_a_routine_that_looks_under_its_return_address():
+    """`call P / ret' is `jp P' only if P finds the same thing on the stack
+    either way.  This P takes two return addresses off and puts one back:
+    called, it returns to its caller's caller; jumped to, one level
+    further."""
+    src = ("\tld hl,0\n\tcall Q\n\tld hl,1\n\tjp 0\nQ:\n\tcall P\n\tret\n"
+           "P:\n\tpop de\n\tpop bc\n\tpush de\n\tld de,0\n\tld bc,0\n\tret\n")
+    out = assert_equivalent(src)
+    assert "call P" in instrs(out)
+    # And a routine that calls one: its stack after the call is not known.
+    src = ("\tld hl,0\n\tcall S\n\tld hl,1\n\tjp 0\nS:\n\tcall Q\n\tret\nQ:\n\tcall P\n\tld a,1\n\tret\n"
+           "P:\n\tpop de\n\tpop bc\n\tpush de\n\tld de,0\n\tld bc,0\n\tret\n")
+    out = assert_equivalent(src)
+    assert "call Q" in instrs(out)
