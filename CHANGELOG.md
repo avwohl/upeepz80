@@ -126,15 +126,30 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   5`), are taken to be outside the text. On the corpus this costs 14
   bytes: five tail calls in each of the two builds of PIP.PLM, whose `DO
   CASE` goes through `jp (hl)`.
-- **`push bc / call SHOWP / ret` became `push bc / jp SHOWP`,** as in
-  0.2.5. Jumped to, SHOWP finds BC where its return address was, and its
-  caller's return address where BC was. SHOWP here is in another module
-  and takes its argument off the stack (`pop hl / pop de / push hl`). It
-  took the return address for the argument and returned to BC, and the
-  program hung. No tail call is now made where the caller may have pushed
-  something: where the stack height at the `call` is other than 0, or not
-  known, as after `ld sp,hl`. On the corpus this costs one byte, in
-  LOAD.PLM.
+- **`push … / call x / ret` became `push … / jp x`,** as in 0.2.5.
+  Jumped to, `x` finds its caller's return address where the pushed word
+  should be, and the pushed word where its own return address should be.
+  That is wrong wherever `x` removes the words pushed for it, as a routine
+  written to PL/M-80's calling convention does: its first arguments are
+  pushed, the last two are in BC and DE, and the callee takes the pushed
+  ones off the stack. uplm80 0.4.0 calls that way, so where a procedure
+  ended in `CALL p(a, b, c)`, p took the return address for `a` and
+  returned to the address `a` held. A SHOWP of another module that takes
+  its argument off the stack (`pop hl / pop de / push hl`), after `push bc
+  / call SHOWP / ret`, returned to BC, and the program hung. 0.2.5
+  declined the tail call only where `x` was a routine of this text that
+  moves its return address; `x` is often in another module, or reached
+  through `jp (hl)`, and a routine of this text that removes its
+  arguments only at its exit is not seen to.
+
+  `call x / ret` now becomes `jp x` only where the stack height since the
+  routine was entered is known to be 0, and the routine has not moved its
+  own return address (nor, where the text makes a pointer from SP, written
+  through a pointer). The height is not known after `ld sp,hl`, for one. A
+  callee outside the text can only make the counted height too high,
+  never too low, so a count of 0 is exact - where the routine was entered
+  by a `call` (see below). Code that nothing reaches, such as a routine
+  never called, is exempt. On the corpus this costs one byte, in LOAD.PLM.
 - **A routine that goes on to code that changes its caller's return
   address was taken to come back to its call, where the optimizer does
   not follow the way.** 0.2.5 did the same. In `QQ: ld hl,RTN / call DSP

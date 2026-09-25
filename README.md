@@ -125,6 +125,16 @@ change it through a pointer made from SP (`ld hl,0 / add hl,sp / ld
 (hl),e`), or that calls a routine that goes on where the optimizer cannot
 follow (`jp (hl)`, `push hl / ret`).
 
+`call x / ret` becomes `jp x` only where nothing is pushed since the routine
+was entered, and the routine has not moved its own return address. Jumped
+to, `x` finds on top of the stack what `call x` would have put under its
+return address. That matters to a callee that removes the arguments pushed
+for it, as under PL/M-80's calling convention, which uplm80 0.4.0 uses. Nor
+is it made where `x` is a routine of the text that takes its return address
+off the stack, reads above it, or calls one that does; nor where a jump the
+optimizer cannot follow (`push bc / ld hl,HND / jp (hl)`) may have entered
+the routine with something pushed.
+
 Numbers are read under the text's radix. Where it sets a `.radix` other than
 ten, only numbers that mean the same under any radix are rewritten.
 

@@ -1832,13 +1832,21 @@ class PeepholeOptimizer:
                     continue
                 # Jumped to, a routine finds its caller's return address
                 # where it looked for its own.  One of this text's that
-                # takes it off the stack has to be called.  So does any
-                # routine where the caller may have pushed its arguments,
-                # which one of another module may take off the stack
-                # (`push bc / call SHOWP / ret').
-                if pattern.name == "tail_call" and (code.moves_return(instrs[0][1]) or
-                                                    code.routines.pushed(instruction_lines[0])):
-                    continue
+                # takes it off the stack, or reads above it, has to be
+                # called.  And the callee finds its own return address on
+                # top of the stack only where nothing is pushed since the
+                # caller was entered, and the caller has not moved its own.
+                # A callee that removes the arguments pushed for it (PL/M-80's
+                # convention, whether or not it is in this text: `push bc /
+                # call SHOWP / ret') would take the return address for one of
+                # them.  Code nothing reaches - a routine never called - may be
+                # rewritten as it likes.
+                if pattern.name == "tail_call":
+                    r = code.routines
+                    at = instruction_lines[0]
+                    if code.moves_return(instrs[0][1]) or r.pushed(at) or \
+                            (r.wild[at] and (r.open[at] or bool(r.entries[at]))):
+                        continue
                 # A store through a register may land in the slot the push
                 # fills, where the text makes a pointer from SP, and change
                 # the flags the pop takes back.
