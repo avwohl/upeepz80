@@ -3,7 +3,7 @@
 Notable changes to upeepz80. Releases up to 0.2.4 are described on the
 [GitHub releases page](https://github.com/avwohl/upeepz80/releases).
 
-## Unreleased
+## 0.2.5 - 2026-09-25
 
 A rewrite that changes what a register or flag holds afterwards is now made
 only where nothing reads the old value. Most rewrites were made wherever
