@@ -3,7 +3,7 @@
 Notable changes to upeepz80. Releases up to 0.2.4 are described on the
 [GitHub releases page](https://github.com/avwohl/upeepz80/releases).
 
-## Unreleased
+## 0.2.6 - 2026-09-25
 
 The corpus below is what uplm80 0.3.7 (its release branch at 0a25af2)
 makes of the MP/M II and 80un PL/M sources at `-O2`: 87 texts, of which 77
@@ -291,6 +291,20 @@ is the same, and 0.2.5's is 213,063. `optimize()` takes about as long as
   holds the address of code is taken to be an address that is only
   jumped to. A table whose entries are compared, or used as data, would
   change.
+
+- **Code that only address arithmetic reaches is taken to be reached by
+  nothing,** so a tail call there is not checked against what a jump the
+  optimizer cannot follow may have pushed: `push hl / ld hl,LL+3 / jp (hl)`
+  with `LL: jp 0 / call SHOWP / ret` still becomes `jp SHOWP`, and so do
+  `jp LL+3`, `push hl / ret` to it, `jr $+3` over a `ret`, and the second
+  entry of a `jp` table. 0.2.5 does the same. A compiler that writes its
+  case tables as `dw` lists, as uplm80 does, never produces this.
+- **A `pop` of the return address is not seen as moving it where the
+  routine's entry height is not known.** When the ways into a routine
+  disagree about the height (a routine that has pushed something falls into
+  a label that is also called), `SUBR: pop hl / ld (V),hl / jp EXT` is not
+  taken to move its return address, and `call SUBR / ret` still becomes a
+  jump. 0.2.5 does the same; it takes hand-written code of that shape.
 
 ## 0.2.5 - 2026-09-25
 
