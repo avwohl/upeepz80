@@ -8,9 +8,12 @@ are well established); the undocumented bits 3 and 5 of F are not modelled
 and should be masked off when comparing.
 
 Symbols name addresses: pass ``symbols={"V0": 0x8000, ...}``.  ``equ`` lines
-in the source are honoured.  A ``call`` to a label in the source pushes a
-return address and goes there; a ``ret`` with nothing of ours on the stack
-ends the run, as do ``halt``, ``jp 0`` and running off the end.
+in the source are honoured.  The data the source defines (``ds``, ``db``,
+``dw``) is laid out from DATA_BASE on as an assembler lays it out, one line
+after another; a label of code is only its line.  A ``call`` to a label in
+the source pushes a return address and goes there; a ``ret`` with nothing
+of ours on the stack ends the run, as do ``halt``, ``jp 0`` and running off
+the end.
 """
 
 from __future__ import annotations
@@ -21,10 +24,16 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from upeepz80.z80 import parse_number, split_operands, strip_comment  # noqa: E402
+from upeepz80.z80 import data_size, parse_number, split_operands, strip_comment  # noqa: E402
 
 CODE_BASE = 0x1000  # pseudo address of line 0; return addresses are CODE_BASE + line
+DATA_BASE = 0xA000  # where the data the text defines (ds, db, dw) is laid out
 SENTINEL = 0x0FFE  # the return address the run starts with
+
+DATA_OPS = ("db", "dw", "ds", "defb", "defw", "defs")
+# Directives that emit nothing and are passed over when run.
+DIRECTIVES = ("public", "extrn", "extern", ".z80", "end", "org", "title", "name",
+              "cseg", "dseg", "aseg")
 
 FS, FZ, FH, FP, FN, FC = 0x80, 0x40, 0x10, 0x04, 0x02, 0x01
 FLAG_MASK = 0xD7  # S Z H P/V N C
@@ -61,6 +70,7 @@ class Machine:
         self.lines: list[tuple[str, list[str]] | None] = []
         self.labels: dict[str, int] = {}
         self.symbols = {k.lower(): v for k, v in (symbols or {}).items()}
+        equates: list[tuple[str, str]] = []
         for idx, raw in enumerate(source.split("\n")):
             text = strip_comment(raw)
             if not text.strip():
@@ -77,7 +87,7 @@ class Machine:
                     # NAME equ VALUE
                     parts = body.split(None, 1)
                     if parts and parts[0].lower() in ("equ", "defl", "set"):
-                        self.symbols[label.lower()] = self.eval(parts[1])
+                        equates.append((label.lower(), parts[1]))
                         self.lines.append(None)
                         continue
                     raise SimError(f"cannot parse {raw!r}")
@@ -87,7 +97,7 @@ class Machine:
                 op = parts[0].lower()
                 ops = split_operands(parts[1]) if len(parts) > 1 else []
                 if op in ("equ", "defl") and label:
-                    self.symbols[label.lower()] = self.eval(ops[0])
+                    equates.append((label.lower(), ops[0]))
                     self.lines.append(None)
                     continue
                 self.lines.append((op, ops))
@@ -97,6 +107,9 @@ class Machine:
                 if label.lower() in self.labels:
                     raise SimError(f"label {label} defined twice")
                 self.labels[label.lower()] = idx
+        self._lay_out_data()
+        for name, expr in equates:
+            self.symbols[name] = self.eval(expr)
         self.mem = bytearray(0x10000)
         self.r = {k: 0 for k in R8}
         self.f = 0
@@ -105,6 +118,55 @@ class Machine:
         self.sp = 0xF000
         self.pc = 0
         self.steps = 0
+
+    def _lay_out_data(self) -> None:
+        """Give the labels of data their addresses, as an assembler would.
+
+        Code has no bytes here: a label of code is its line.  Data is laid
+        out from DATA_BASE on, one line after another in the order of the
+        text and as long as the assembler makes it, so that an address
+        computed from one label (``ld hl,A+1``) finds what the assembler
+        puts there.  A label alone on its line belongs to the next line
+        that holds anything."""
+        self.data: list[tuple[int, str, list[str]]] = []
+        top = DATA_BASE
+        pending: list[str] = []
+        by_line = {idx: name for name, idx in self.labels.items()}
+        for idx, ins in enumerate(self.lines):
+            name = by_line.get(idx)
+            if name is not None:
+                pending.append(name)
+            if ins is None or ins[0] in DIRECTIVES:
+                continue
+            op, ops = ins
+            if op in DATA_OPS:
+                size = data_size(op, ops)
+                if size is None:
+                    raise SimError(f"size of {op} {ops} not known")
+                for label in pending:
+                    del self.labels[label]
+                    self.symbols[label] = top
+                if op not in ("ds", "defs"):
+                    self.data.append((top, op, ops))
+                top += size
+            pending = []
+
+    def _initialise_data(self) -> None:
+        """What ``db`` and ``dw`` put in memory before the program runs."""
+        for addr, op, ops in self.data:
+            for item in ops:
+                it = item.strip()
+                if op in ("dw", "defw"):
+                    v = self.eval(it) & 0xFFFF
+                    self.mem[addr], self.mem[addr + 1] = v & 0xFF, v >> 8
+                    addr += 2
+                elif len(it) >= 2 and it[0] == it[-1] and it[0] in "'\"":
+                    for ch in it[1:-1].replace(it[0] * 2, it[0]):
+                        self.mem[addr] = ord(ch) & 0xFF
+                        addr += 1
+                else:
+                    self.mem[addr] = self.eval(it) & 0xFF
+                    addr += 1
 
     # ---- values -----------------------------------------------------------
     def eval(self, expr: str) -> int:
@@ -312,7 +374,9 @@ class Machine:
         """Run from line 0: 'ret', 'halt', 'boot', 'end' or 'timeout'.
 
         The run starts as if called: a return address that is no line of the
-        program is pushed, and a ``ret`` that pops it ends the run."""
+        program is pushed, and a ``ret`` that pops it ends the run.  The
+        data the text defines with ``db`` and ``dw`` is put in memory first."""
+        self._initialise_data()
         self.push(SENTINEL)
         while True:
             if self.pc >= len(self.lines):
@@ -338,9 +402,9 @@ class Machine:
     def step(self, op: str, ops: list[str], nxt: int) -> int | str:  # noqa: C901
         n = len(ops)
         lo = [o.replace(" ", "").lower() for o in ops]
-        if op in ("db", "dw", "ds", "defb", "defw", "defs"):
+        if op in DATA_OPS:
             raise SimError("ran into data")
-        if op in ("public", "extrn", "extern", ".z80", "end", "org", "title", "name"):
+        if op in DIRECTIVES:
             return nxt
         if op == "nop" or op in ("di", "ei"):
             return nxt

@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 
 from upeepz80 import PeepholeOptimizer  # noqa: E402
-from upeepz80.z80 import UNKNOWN, effect, strip_comment  # noqa: E402
+from upeepz80.z80 import BARRIERS, UNKNOWN, effect, strip_comment  # noqa: E402
 from z80sim import FLAG_MASK, Machine, SimError  # noqa: E402
 
 VARS = {f"V{i}": 0x8000 + 2 * i for i in range(8)}
@@ -508,6 +508,8 @@ def invalid_instructions(asm: str) -> list[str]:
         if not body:
             continue
         parts = body.split(None, 1)
+        if parts[0].lower() in BARRIERS:
+            continue  # a directive: cseg, dseg, org, end
         if effect(parts[0], parts[1] if len(parts) > 1 else "") is UNKNOWN:
             bad.append(line.strip())
     return bad
