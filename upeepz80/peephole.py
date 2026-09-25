@@ -157,6 +157,32 @@ def _slots(need: frozenset) -> bool:
     return any(type(x) is tuple for x in need)
 
 
+# Instructions that read memory at the address HL holds without naming it.
+_BLOCK_READS = frozenset({"ldi", "ldd", "ldir", "lddr", "cpi", "cpd", "cpir", "cpdr",
+                          "outi", "outd", "otir", "otdr", "rld", "rrd"})
+
+
+def _makes_stack_pointer(op: str | None, eff: Effect | None) -> bool:
+    """Does the instruction take SP's value as a value - ``add hl,sp``,
+    ``ld (nn),sp`` - and so make a pointer into the stack?"""
+    return eff is not None and eff.flow == "next" and "sp" in eff.reads and \
+        eff.stack == 0 and op != "ex"
+
+
+def _reads_through_pointer(op: str | None, operands: str) -> bool:
+    """Does the instruction read memory at an address that HL, BC, DE, IX
+    or IY holds?  (SP's reads - pop, ret, ex (sp) - are the stack's.)"""
+    if op is None or op in ("jp", "jr", "call", "djnz"):
+        return False  # `jp (hl)' goes there, and reads nothing
+    if op in _BLOCK_READS:
+        return True
+    for k, part in enumerate(split_operands(operands)):
+        if classify(part).kind in ("mem_hl", "mem_bc", "mem_de", "mem_idx") and \
+                not (op == "ld" and k == 0):
+            return True
+    return False
+
+
 class _Routines:
     """Where each line's ``ret`` goes, and how deep the stack is there.
 
@@ -335,6 +361,10 @@ class _Code:
     def __init__(self, lines: list[str]):
         self.lines = lines
         self.effects: list[Effect | None] = []
+        # Lines that read memory through a register (_reads_through_pointer).
+        self.pointer_reads: list[bool] = []
+        # Does any line make a pointer into the stack from SP?
+        self.stack_pointer = False
         self.labels: dict[str, int | None] = {}
         self.label_lines: list[tuple[str, int]] = []
         self.equ: dict[str, int] = {}
@@ -361,12 +391,16 @@ class _Code:
                     self.equ.pop(label, None)
                 seen_equ.add(label)
                 self.effects.append(None)
+                self.pointer_reads.append(False)
                 continue
             if label:
                 # A label defined twice is nowhere in particular.
                 self.labels[label] = None if label in self.labels else idx
                 self.label_lines.append((label, idx))
-            self.effects.append(None if op is None else effect(op, operands, self.radix))
+            eff = None if op is None else effect(op, operands, self.radix)
+            self.effects.append(eff)
+            self.pointer_reads.append(_reads_through_pointer(op, operands))
+            self.stack_pointer = self.stack_pointer or _makes_stack_pointer(op, eff)
         self._layout: tuple[list[int], list[int], list[int]] | None = None
         self._routines: _Routines | None = None
 
@@ -389,10 +423,14 @@ class _Code:
         into a routine of the module that is called and back after the call,
         and from a ``ret`` to the line after each call of the routine.  A
         value pushed is followed through its slot on the stack to the pop
-        that takes it off.  What cannot be followed - a call or jump out of
-        the module, ``jp (hl)``, a ``ret`` from code entered who knows how,
-        data, the end of the text, a stack that is not balanced - reads
-        everything."""
+        that takes it off.  An instruction on the way that reads SP may read
+        the slot, and so may one that reads memory through another register
+        where the text makes a pointer from SP anywhere (``add hl,sp``,
+        ``ld (nn),sp``): one made before the push can reach the slot.
+        (Another module is taken not to reach below the SP it calls with.)
+        What cannot be followed - a call or jump out of the module, ``jp
+        (hl)``, a ``ret`` from code entered who knows how, data, the end of
+        the text, a stack that is not balanced - reads everything."""
         need0 = frozenset(resources)
         if not need0:
             return False
@@ -496,6 +534,11 @@ class _Code:
                     continue
 
                 if eff.reads & need:
+                    return True
+                if self.pointer_reads[i] and self.stack_pointer and _slots(need):
+                    # A pointer made from SP before the push may reach the
+                    # slot: `ld hl,0 / add hl,sp / dec hl / dec hl / push
+                    # de / ld a,(hl)'.
                     return True
                 if eff.flow == "call":
                     t = self.target(eff.target)

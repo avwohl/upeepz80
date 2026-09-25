@@ -207,6 +207,36 @@ def test_liveness_follows_a_value_through_the_stack():
     assert instrs(optimize(src))[0] == "ld a,5"
 
 
+@pytest.mark.parametrize("before", [
+    # DE is made to point at where the push will put H.
+    "\tld hl,0\n\tadd hl,sp\n\tdec hl\n\tex de,hl\n",
+    # DE points at the top of the stack; the pop frees the slot, and the
+    # push fills it again (and `ld a,(de)' reads L).
+    "\tpush bc\n\tld hl,0\n\tadd hl,sp\n\tex de,hl\n\tpop bc\n",
+    # The address of the stack kept in memory.
+    "\tld (W),sp\n\tld de,(W)\n\tdec de\n",
+])
+def test_a_pushed_value_read_through_a_pointer_made_from_sp(before):
+    """`ld hl,300 / ld a,l' became `ld a,02Ch': HL was followed through
+    its push to the pop, which takes it into BC, which is overwritten.  But
+    `ld a,(de)' reads the pushed value too, through an address made from
+    SP before the push."""
+    src = before + ("\tld hl,300\n\tld a,l\n\tpush hl\n\tld a,(de)\n\tpop bc\n"
+                    "\tld bc,0\n\tld hl,0\n\tret\n")
+    out = assert_equivalent(src)
+    assert "ld hl,300" in instrs(out)
+
+
+def test_a_pushed_value_where_nothing_makes_a_pointer_from_sp():
+    """Where the text never takes SP's value, a pointer into the stack can
+    only come from another module, which does not reach below the SP it
+    calls with: the push is followed to its pop as before."""
+    src = ("\tld de,W\n\tld hl,300\n\tld a,l\n\tpush hl\n\tld a,(de)\n\tpop bc\n"
+           "\tld bc,0\n\tld hl,0\n\tret\n")
+    out = assert_equivalent(src)
+    assert "ld a,02Ch" in instrs(out)
+
+
 def test_dead_store_named_by_an_equ_is_kept():
     """`ALIAS: EQU PARAM' (uplm80's form for AT) names the location, and a
     read of ALIAS reads it."""

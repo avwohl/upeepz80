@@ -39,6 +39,19 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   removed with uplm80 0.3.7. The 77 outputs that assemble grow by 45
   bytes, from 213,017 to 213,062. Without uplm80's `EQU`, it keeps 19 of
   30, and the code is the same as with it.
+- **A value on the stack was taken to be read only by its `pop`, and by
+  what reads SP.** Code can also read it through a pointer made from SP
+  before the push. After `ld hl,0 / add hl,sp / dec hl / ex de,hl`, DE
+  points where `push hl` puts H. In `ld hl,300 / ld a,l / push hl / ld
+  a,(de) / pop bc / ld bc,0`, HL was followed through the push to the
+  `pop`, into BC, which is overwritten. So HL was taken for dead, `ld
+  hl,300 / ld a,l` became `ld a,02Ch`, and `ld a,(de)` read the old H.
+  Now, where the text makes a pointer from SP anywhere (`add hl,sp`, `add
+  ix,sp`, `ld (nn),sp`), a read of memory through HL, BC, DE, IX or IY
+  (and `ldir` and the like) counts as a read of what is on the stack.
+  Another module is taken not to reach below the SP that it calls with.
+  On the corpus this costs 13 `cp 0` → `or a` and one `ld a,0` → `xor
+  a`, 14 bytes in six outputs.
 
 ### Added
 
@@ -47,6 +60,9 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   its 40 tests fail on 0.2.5. `tests/z80sim.py` now lays out the data a
   text defines as an assembler does, so that `ld hl,A+1` finds the byte
   after A.
+- `tests/test_liveness.py`: a pushed value read through a pointer made
+  from SP, three ways, each run before and after optimization; they fail
+  on 0.2.5.
 
 ## 0.2.5 - 2026-09-25
 
