@@ -213,3 +213,31 @@ def test_dead_store_named_by_an_equ_is_kept():
     for equ in ("ALIAS:\tEQU\tPARAM", "ALIAS\tequ\tPARAM"):
         src = equ + "\nP:\n\tld (PARAM),a\n\tret\nQ:\n\tld a,(ALIAS)\n\tret\n"
         assert "(PARAM),a" in optimize(src), equ
+
+
+def test_dead_store_through_another_name_is_kept():
+    """`slot equ alias' makes the location a store to slot writes one that
+    `ld a,(alias)' reads.  The line that defines slot was skipped as its
+    definition, and the store removed."""
+    src = ("\tld a,5\n\tcall P1\n\tld a,(ALIAS)\n\tret\nP1:\n\tld (SLOT),a\n\tret\n"
+           "ALIAS\tequ 8004h\nSLOT\tequ ALIAS\n")
+    out = assert_equivalent(src)
+    assert "ld (SLOT),a" in instrs(out)
+    # Nor is a location that is not storage of this module's own: one the
+    # text sets with equ, exports with `::' or `public', or does not define.
+    for decl in ("SLOT\tequ 8004h\n", "SLOT::\tds 1\n", "\tpublic SLOT\nSLOT:\tds 1\n",
+                 "BUF\tequ 8004h\nSLOT\tequ BUF+1\n", "", "\textrn SLOT\n"):
+        src = "\tcall P1\n\tret\nP1:\n\tld (SLOT),a\n\tret\n" + decl
+        assert "(SLOT),a" in optimize(src), decl
+    for decl in ("BUF\tequ 8004h\n", "\tpublic BUF\nBUF:\tds 4\n", "BUF::\tds 4\n"):
+        src = "\tcall P1\n\tret\nP1:\n\tld (BUF+1),a\n\tret\n" + decl
+        assert "(BUF+1),a" in optimize(src), decl
+    # Storage of its own that nothing reads: the store goes.
+    src = "\tcall P1\n\tret\nP1:\n\tld (SLOT),a\n\tret\nSLOT:\tds 1\n"
+    assert "(SLOT),a" not in optimize(src)
+    src = "\tcall P1\n\tret\nP1:\n\tld (BUF + 1),a\n\tret\nBUF:\tds 4\n"
+    assert "(BUF + 1),a" not in optimize(src)
+    # A read spelled with blanks is a read.
+    src = ("\tcall P1\n\tld a,(BUF + 1)\n\tret\nP1:\n\tld (BUF+1),a\n\tret\n"
+           "BUF:\tds 4\n")
+    assert "(BUF+1),a" in optimize(src)

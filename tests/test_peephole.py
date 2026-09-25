@@ -640,10 +640,12 @@ class TestDeadStoreElimination:
 
     def test_dead_store_removed(self):
         """Store to unused memory location is removed."""
-        asm = "myproc:\n\tld (PARAM),a\n\tadd a,b\n\tret"
+        asm = "myproc:\n\tld (PARAM),a\n\tadd a,b\n\tret\nPARAM:\tds 1"
         result = optimize(asm)
         assert "myproc:" in result
         assert "(PARAM)" not in result
+        # One this module does not define is another's.
+        assert "(PARAM)" in optimize("myproc:\n\tld (PARAM),a\n\tadd a,b\n\tret")
 
     def test_live_store_kept(self):
         """Store to memory location that is later loaded is kept."""

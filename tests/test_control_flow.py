@@ -34,11 +34,11 @@ def test_labels_named_in_a_table_are_kept():
 
 def test_dead_store_read_as_part_of_a_word_is_kept():
     """A sixteen-bit load from the byte before reads the stored byte too."""
-    src = "P:\n\tld (??AUTO+3),a\n\tret\nQ:\n\tld hl,(??AUTO+2)\n\tret\n"
+    src = "P:\n\tld (??AUTO+3),a\n\tret\nQ:\n\tld hl,(??AUTO+2)\n\tret\n??AUTO:\n\tds 4\n"
     assert "(??AUTO+3),a" in optimize(src)
-    src = "P:\n\tld (??AUTO+1),a\n\tret\nQ:\n\tld de,(??AUTO)\n\tret\n"
+    src = "P:\n\tld (??AUTO+1),a\n\tret\nQ:\n\tld de,(??AUTO)\n\tret\n??AUTO:\n\tds 4\n"
     assert "(??AUTO+1),a" in optimize(src)
-    src = "P:\n\tld (??AUTO+3),a\n\tret\nQ:\n\tld a,(??AUTO+2)\n\tret\n"
+    src = "P:\n\tld (??AUTO+3),a\n\tret\nQ:\n\tld a,(??AUTO+2)\n\tret\n??AUTO:\n\tds 4\n"
     assert "(??AUTO+3),a" not in optimize(src)
 
 
@@ -82,3 +82,13 @@ def test_no_tail_call_to_a_routine_that_looks_under_its_return_address():
            "P:\n\tpop de\n\tpop bc\n\tpush de\n\tld de,0\n\tld bc,0\n\tret\n")
     out = assert_equivalent(src)
     assert "call Q" in instrs(out)
+
+
+def test_dead_store_read_spelled_otherwise_is_kept():
+    """A load of the stored byte is a read however its address is written."""
+    tail = "\tret\nP:\n\tld (BUF+13),a\n\tret\nBUF:\n\tds 16\n"
+    for load in ("ld a,(BUF+0DH)", "ld a,(BUF + 13)", "ld hl,(BUF+12)", "ld de,(BUF+0CH)",
+                 "ld a,(BUF+14-1)"):
+        assert "(BUF+13),a" in optimize(f"\tcall P\n\t{load}\n" + tail), load
+    for load in ("ld a,(BUF+12)", "ld hl,(BUF+14)", "ld a,(BUF)", "ld (BUF+13),hl"):
+        assert "(BUF+13),a" not in optimize(f"\tcall P\n\t{load}\n" + tail), load

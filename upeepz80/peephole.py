@@ -54,6 +54,8 @@ _SUBDE = ("??subde", "@subde")
 _LABEL = re.compile(r"^([A-Za-z_?@$.][\w?@$.]*)(::?)?(.*)$")
 # `NAME::' is M80's way to define a label and make it PUBLIC in one.
 _EXPORTED = re.compile(r"^([A-Za-z_?@$.][\w?@$.]*)::")
+# Directives that hand a name to, or take one from, another module.
+_LINKAGE = frozenset({"public", "global", "entry", "extrn", "extern", "ext", "external"})
 _IDENT = re.compile(r"[A-Za-z_?@$.][\w?@$.]*")
 _SWAP = {"d": "h", "e": "l", "h": "d", "l": "e"}
 # Directives that give a name a value.  Only an `equ' gives it one value
@@ -101,6 +103,19 @@ def _radix(lines: list[str]) -> int | None:
             if op in (".radix", "radix") and operands.strip() != "10":
                 return None
     return 10
+
+
+def _base_offset(expr: str, radix: int | None) -> tuple[str, int] | None:
+    """``NAME``, ``NAME+N`` or ``NAME-N`` (no blanks) as (name, N), or None."""
+    m = re.fullmatch(r"([A-Za-z_?@$.][\w?@$.]*)(?:([+-])(\w+))?", expr)
+    if not m:
+        return None
+    if not m.group(2):
+        return m.group(1).lower(), 0
+    k = parse_number(m.group(3), radix)
+    if k is None:
+        return None
+    return m.group(1).lower(), -k if m.group(2) == "-" else k
 
 
 def _same_operand(a: str, b: str) -> bool:
@@ -1734,57 +1749,79 @@ class PeepholeOptimizer:
     def _addr_is_live(self, lines: list[str], addr: str, store_index: int) -> bool:
         """Does anything outside ``lines[store_index]`` need ``addr``?
 
-        Conservative by construction: a name that is read, exported, or used
-        anywhere as a value rather than as a store destination counts as live.
+        Conservative by construction.  Each name in the address has to be
+        storage this module keeps for itself: defined once, by a ``ds``,
+        ``db`` or ``dw`` on the label's line or after it, and not exported
+        with ``::`` or named by ``public`` (or ``extrn``).  A name the text
+        sets with ``equ`` may be another name for the same bytes (``SLOT equ
+        ALIAS``), or an address something outside the program reads; one not
+        defined here is another module's.  Past that, a line that names the
+        address other than to store to it is a use of it, and so is a load
+        of any byte of it, however the address is spelled (``(BUF+0DH)``,
+        a sixteen-bit load from the byte before).
         """
-        target = addr.strip().lower()
+        target = re.sub(r"\s+", "", addr).lower()
         if not target:
             return True
+        names = {t for t in re.findall(r"[\w?@$.]+", target) if not t[0].isdigit()}
+        if not names:
+            return True  # an address given as a number
+        radix = _radix(lines)
+        place = _base_offset(target, radix)
         paren = "(" + target + ")"
-        # A sixteen-bit load from the byte before reads this one too.
-        m = re.fullmatch(r"(.*?)\+(\d+)", target)
-        below: set[str] = set()
-        if m and int(m.group(2)) >= 1:
-            k = int(m.group(2)) - 1
-            below = {f"({m.group(1)}+{k})"} | ({f"({m.group(1)})"} if k == 0 else set())
+        defined: set[str] = set()
         for j, raw in enumerate(lines):
             if j == store_index:
                 continue
-            text = raw.strip().lower()
-            if not text or text.startswith(";"):
+            label, op, operands = _split(raw)
+            if label is not None and label.lower() in names:
+                if _exported(raw) or label.lower() in defined or not self._is_storage(lines, j):
+                    return True
+                defined.add(label.lower())
+            flat = re.sub(r"\s+", "", operands).lower()
+            if not flat:
                 continue
-            if below and any(b in text for b in below):
-                parsed = self._parse_line(text)
-                if parsed and parsed[0] == "ld":
-                    parts = split_operands(parsed[1])
-                    if len(parts) == 2 and parts[1] in below and \
-                            classify(parts[0]).kind == "r16":
-                        return True
-            if target not in text:
+            if op in _LINKAGE:
+                if names & {t.lower() for t in _IDENT.findall(flat)}:
+                    return True
                 continue
-            parsed = self._parse_line(text)
-            if not parsed:
-                # A label definition or a directive. `public NAME' hands the
-                # name to another module, which may read it, and `ALIAS equ
-                # NAME' or `db low(NAME)' names it too; the line that defines
-                # the location is no use of it.
-                label, op, operand = _split(raw)
-                if label is not None and label.lower() == target and \
-                        target not in operand.lower():
-                    continue
-                if op is None:
-                    continue
-                return True
-            op, operand = parsed[0], parsed[1] if len(parsed) > 1 else ""
-            if op in ("public", "global", "extrn", "external"):
-                return True
-            if op == "ld" and operand.startswith(paren):
+            if op == "ld" and place is not None:
+                parts = split_operands(flat)
+                if len(parts) == 2:
+                    dst, src = classify(parts[0]), classify(parts[1])
+                    if src.kind == "mem_abs" and dst.kind in ("r8", "r16"):
+                        at = _base_offset(parts[1][1:-1], radix)
+                        if at is None:
+                            if names & {t.lower() for t in _IDENT.findall(parts[1])}:
+                                return True
+                        elif at[0] == place[0] and \
+                                at[1] <= place[1] < at[1] + (2 if dst.kind == "r16" else 1):
+                            return True
+                        continue
+                    if dst.kind == "mem_abs" and src.kind in ("r8", "r16"):
+                        continue  # a store: not a read
+            if target not in flat:
+                continue
+            if op == "ld" and flat.startswith(paren + ","):
                 # A store to it. Not a read.
                 continue
             # Anything else that names it - a load, an address taken with
-            # `ld hl,NAME', a `dw NAME' in a table - keeps it alive.
+            # `ld hl,NAME', a `dw NAME' in a table, `ALIAS equ NAME' - keeps
+            # it alive.
             return True
-        return False
+        return defined != names
+
+    def _is_storage(self, lines: list[str], j: int) -> bool:
+        """Is the label on line ``j`` that of a ``ds``, ``db`` or ``dw``, on
+        its own line or the next that has anything on it?"""
+        _, op, _ = _split(lines[j])
+        k = j + 1
+        while op is None and k < len(lines):
+            label, op, _ = _split(lines[k])
+            if label is not None:
+                return False
+            k += 1
+        return op in DATA
 
     # ---- lines --------------------------------------------------------------
 
