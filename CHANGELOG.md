@@ -124,14 +124,30 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   ld (x),a / pop af` → the instruction in the middle, assume that x is not
   the slot the push fills. Code outside the text is taken to change no
   return address but its own, and not to reach below the SP it is called
-  with.
+  with. Nor is it taken to hand back a pointer into the stack, as a
+  routine of another module that returns SP in HL would: only this text's
+  pointers made from SP count. Nor, where it is handed such a pointer, to
+  read through it what is above its own return address, which a tail
+  call in this text changes: `W: ld hl,0 / add hl,sp / dec hl / dec hl /
+  call RB / ret` with `RB: call EXT / ld a,1 / ret` still becomes `jp
+  RB`, and EXT reads its own return address through HL, not RB's.
+  Taking every routine that calls out of the text, where the text makes
+  such a pointer, to read above its return address costs 16 bytes in four
+  outputs of the corpus.
 - **A program is taken not to depend on the size of its code,** which
   every rewrite changes. Dead-store elimination relies on this: an
   address is not computed across an instruction. A table of `jp`
   instructions entered at a computed offset, such as a BIOS's jump
   vector (`BIOS+3`), does depend on it. Relative jumps break it: `BIOS:
   jp BOOT / jp WBOOT` becomes `BIOS: jr BOOT / jr WBOOT`, as in 0.2.5.
-  uplm80 writes such tables as `dw` lists, which are not changed.
+  So does jump threading, which removes a jump whose label nothing names
+  where the line before does not go on to it: `BIOS:: jp BOOT / WBE: jp
+  WBOOT / CSE: jp CONST` keeps only its first line, as in 0.2.5.
+  uplm80 writes such tables as `dw` lists, whose layout is not changed.
+- **`dw L`, where L is `jp M`, becomes `dw M`,** as in 0.2.5. A word that
+  holds the address of code is taken to be an address that is only
+  jumped to. A table whose entries are compared, or used as data, would
+  change.
 
 ## 0.2.5 - 2026-09-25
 

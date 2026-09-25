@@ -241,7 +241,9 @@ class _Routines:
     return address or what is above it, which a tail call changes: it
     ``peeks``.  A pointer into the stack is taken to come from this text,
     or from a module that calls it, which does not reach below the SP it
-    calls with.
+    calls with - not from a module this text calls, which hands none
+    back, and reads nothing above its own return address through one it
+    is handed.
     """
 
     def __init__(self, code: "_Code"):
