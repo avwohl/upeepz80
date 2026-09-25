@@ -134,6 +134,11 @@ def program(body: str, data: str = "") -> str:
     ("\tld hl,(PA)\n\tld a,h\n", ""),
     ("\tld a,(PA + 1)\n", ""),
     ("\tld a,(PA+2-1)\n", ""),
+    # Its address, or the neighbour's, a byte at a time: M80 writes the
+    # operators with a space.
+    ("\tld a,HIGH PB\n\tld h,a\n\tld a,LOW PB\n\tld l,a\n\tld a,(hl)\n", ""),
+    ("\tld a,HIGH PA\n\tld h,a\n\tld a,LOW PA\n\tld l,a\n\tinc hl\n\tld a,(hl)\n", ""),
+    ("\tld hl,(TB)\n\tinc hl\n\tld a,(hl)\n", "TB:\tdb LOW PA, HIGH PA\n"),
 ])
 def test_a_store_a_neighbours_address_reaches_is_kept(body, data):
     out = assert_equivalent(program(body, data))
@@ -154,6 +159,9 @@ def test_a_store_a_neighbours_address_reaches_is_kept(body, data):
     program("\tld bc,PA\n"),
     program("\tld a,LOW(PA)\n"),
     program("", "\tdb HIGH(PA)\n"),
+    program("\tld a,LOW PA\n"),
+    program("", "\tdb HIGH\tPA\n"),
+    program("\tld a,PA SHR 8\n"),
     # `$' where the data is.
     program("\tld hl,HERE\n", "HERE\tequ $\n"),
     program("", "\tdw $\n"),

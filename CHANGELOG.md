@@ -21,9 +21,10 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   - The byte is in the data (`ds`, `db`, `dw`) between two instructions of
     a segment. The segment is `cseg` or `dseg`, and the text does not place
     it with `org` or `.phase`.
-  - No operand, `db`, `dw` or `equ` uses a label of that data as a value,
-    and neither does `$` in the instruction before it (`jp $+3`). Nothing
-    exports such a label. SP is not loaded from it.
+  - No operand, `db`, `dw` or `equ` uses a label of that data as a value
+    (`ld hl,PA`, `db LOW PA`), and neither does `$` in the instruction
+    before it (`jp $+3`). Nothing exports such a label. SP is not loaded
+    from it.
   - The data is not run as code, as it is where code patches an
     instruction (`OPC: db 0`). No jump or call goes to a label in the
     data. The instruction before it is a `jp`, `jr`, `ret`, `reti`,
@@ -91,9 +92,10 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
 
 - `tests/test_storage.py`: the program above, run before and after
   optimization, each way to a byte from a neighbour's address, and each
-  way control gets to data that code patches. 39 of its 61 tests fail on
+  way control gets to data that code patches. 44 of its 68 tests fail on
   0.2.5. `tests/z80sim.py` now lays out the data a text defines as an
-  assembler does, so that `ld hl,A+1` finds the byte after A.
+  assembler does, so that `ld hl,A+1` finds the byte after A, and reads
+  M80's `LOW A` and `HIGH A`.
 - `tests/test_liveness.py` and `tests/test_control_flow.py`: a pushed
   value read, and a return address changed, through a pointer made from
   SP, three ways each, a store between `push af` and `pop af`, and the

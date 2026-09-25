@@ -929,7 +929,9 @@ class _Storage:
         NAME-N; ``("runs", runs)`` for anything else that uses labels of
         the text; None where it uses none (a number, another module's
         symbol)."""
-        flat = re.sub(r"\s+", "", expr)
+        # Blanks go only around + and -: M80 writes other operators with
+        # them (`HIGH X', `X SHR 8'), and a name must not run into one.
+        flat = re.sub(r"\s*([+-])\s*", r"\1", expr.strip())
         m = _base_offset(flat.lower(), self.radix)
         if m is not None:
             got = self._name(m[0], here, depth)
@@ -938,7 +940,7 @@ class _Storage:
             seg, run, off = got[1]
             return "at", (seg, run, None if off is None else off + m[1])
         runs: set[tuple[str, int]] = set()
-        for name in _names(flat):
+        for name in _names(expr):
             runs |= self._runs(self._name(name, here, depth))
         return ("runs", runs) if runs else None
 
