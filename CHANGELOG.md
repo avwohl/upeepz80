@@ -3,6 +3,51 @@
 Notable changes to upeepz80. Releases up to 0.2.4 are described on the
 [GitHub releases page](https://github.com/avwohl/upeepz80/releases).
 
+## Unreleased
+
+### Fixed
+
+- **Dead-store elimination removed a store that an address computed from
+  another label reaches.** PL/M-80 lays out `declare (a, b) byte` one
+  variable after the other, and `.a + 1` is the address of b. uplm80
+  compiles `pq: procedure (a, b) byte; declare (a, b) byte; ... pp = .a +
+  1; return c;`, where `c` is BASED on `pp`, to a store of `b` at pq's entry
+  that no other line names. 0.2.5 removed that store, so `pq('A', 'B')`
+  returned whatever the byte held. uplm80 found this, and 0.3.7 adds an
+  `EQU` that names such a parameter to keep the store. 0.2.5 took storage
+  to be reachable only by its own name. Now a store is removed only where
+  nothing can compute the address of the byte. That is so where all of
+  these are true:
+  - The byte is in the data (`ds`, `db`, `dw`) between two instructions of
+    a segment. The segment is `cseg` or `dseg`, and the text does not place
+    it with `org` or `.phase`.
+  - No operand, `db`, `dw` or `equ` uses a label of that data as a value.
+    Nothing exports such a label. No `call` or `rst` comes right before
+    the data, whose return address would point there. SP is not loaded
+    from it.
+  - No load reads the byte. `ld a,(PA+1)`, and `ld hl,(PA)`, which reads
+    the byte after PA too, read PB where PB is PA+1.
+
+  The reasons, and what they assume, are in the docstring of `_Storage`
+  in `upeepz80/peephole.py`. In short: a program cannot depend on where
+  the linker puts a segment, or on the size of code, which the optimizer
+  changes. No store is removed from a text that has a conditional, a
+  macro, an `include`, a name defined twice or an instruction the
+  optimizer does not know.
+
+  On MP/M II and 80un at `-O2`, this keeps 17 of the 28 stores that 0.2.5
+  removed with uplm80 0.3.7. The 77 outputs that assemble grow by 45
+  bytes, from 213,017 to 213,062. Without uplm80's `EQU`, it keeps 19 of
+  30, and the code is the same as with it.
+
+### Added
+
+- `tests/test_storage.py`: the program above, run before and after
+  optimization, and each way to a byte from a neighbour's address. 32 of
+  its 40 tests fail on 0.2.5. `tests/z80sim.py` now lays out the data a
+  text defines as an assembler does, so that `ld hl,A+1` finds the byte
+  after A.
+
 ## 0.2.5 - 2026-09-25
 
 A rewrite that changes what a register or flag holds afterwards is now made

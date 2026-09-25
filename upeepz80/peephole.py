@@ -37,6 +37,7 @@ from .z80 import (
     UNKNOWN,
     Effect,
     classify,
+    data_size,
     effect,
     hex_byte,
     parse_number,
@@ -57,6 +58,10 @@ _EXPORTED = re.compile(r"^([A-Za-z_?@$.][\w?@$.]*)::")
 # Directives that hand a name to, or take one from, another module.
 _LINKAGE = frozenset({"public", "global", "entry", "extrn", "extern", "ext", "external"})
 _IDENT = re.compile(r"[A-Za-z_?@$.][\w?@$.]*")
+# A name where it starts: not the `FFH' of `0FFH'.
+_NAME = re.compile(r"(?<![\w?@$.])[A-Za-z_?@$.][\w?@$.]*")
+# Directives that choose the segment what follows goes into.
+_SEGMENTS = frozenset({"cseg", "dseg", "aseg", "common"})
 _SWAP = {"d": "h", "e": "l", "h": "d", "l": "e"}
 # Directives that give a name a value.  Only an `equ' gives it one value
 # throughout; the others may be redefined further down.
@@ -116,6 +121,21 @@ def _base_offset(expr: str, radix: int | None) -> tuple[str, int] | None:
     if k is None:
         return None
     return m.group(1).lower(), -k if m.group(2) == "-" else k
+
+
+def _names(text: str) -> set[str]:
+    """The names ``text`` uses, lowercase; what is in quotes aside."""
+    kept = []
+    quote = None
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"" and not (ch == "'" and text[max(0, i - 2):i].lower() == "af"):
+            quote = ch
+        else:
+            kept.append(ch)
+    return {n.lower() for n in _NAME.findall("".join(kept))}
 
 
 def _same_operand(a: str, b: str) -> bool:
@@ -565,6 +585,269 @@ class _Code:
         if target <= first:
             return addr[target] - (addr[first] + new_size) >= -128
         return False
+
+
+# Where a line is: its segment, the run of that segment's data it is in or
+# ends (see _Storage), and its offset in the run if that is known.
+_Place = tuple[str, int, "int | None"]
+
+
+class _Storage:
+    """What can read the bytes of the storage a text defines.
+
+    Code reads a byte at an address its text gives (``ld a,(B)``, and
+    ``ld hl,(A)``, which reads A+1 too), or through a pointer: a register
+    (``ld a,(hl)``, ``ldir``) or SP (``pop``).  A pointer to a byte need
+    not come from the byte's own label.  PL/M-80 lays ``declare (a, b)
+    byte`` out one after the other, and ``.a + 1`` is b's address.  So
+    whether anything names a location does not tell whether anything
+    reads it; whether an address exists from which it can be computed
+    does.  Two premises say which addresses those are:
+
+    1. The linker places each segment of a module (``cseg``, ``dseg``),
+       and the text does not know where.  A program may rely on the order
+       and size of what one segment of the module holds, but not on where
+       the segment is or what lies next to it.  So a number, or a symbol
+       another module defines, is no address in this module's segments -
+       unless the text places the segment itself (``org``, ``.phase``).
+    2. The optimizer changes the size of code, so a program may not rely on
+       it: no address is computed across an instruction, from one side of
+       it to the other, and no instruction's bytes are read as data.
+       (Every rewrite that shortens code would break a program that did,
+       not only this one.)
+
+    So a segment's storage falls into *runs*: the data (``ds``, ``db``,
+    ``dw``) between one of the segment's instructions and the next.  An
+    address in a run can be computed from an address in the same run, and
+    from nothing else.  Such an address comes to exist only
+
+    - from the text: an operand or a ``db`` or ``dw`` item that uses a
+      label of the run (itself, through a name an ``equ`` sets to it, or
+      as ``$`` there) as a value - not as the address of a load or a
+      store, nor as where a jump or call goes.  A label on an instruction,
+      or right before one, is the address where the run before it ends;
+    - from another module, through a label of the run that the text
+      exports (``public``, ``NAME::``) or names in an ``extrn``;
+    - from the processor: a ``call`` or ``rst`` pushes the address of what
+      follows it, which is in a run when data follows the call; and SP,
+      which points into a run only if the text loads it from an address
+      there.
+
+    A run none of these gives an address in is *closed*.
+
+    Claim: if a byte X lies in a ``ds``, ``db`` or ``dw`` of a closed run,
+    of a segment the text does not place, and no load in the text whose
+    address is in that run reads X, then nothing reads X after it is
+    stored.  Proof: a read through a pointer needs a pointer to X, which
+    has to be computed from an address in X's run (1, 2); there is none.
+    A read at an address a text gives reads X only if the address is in
+    X's run (1, 2).  In this text those are the loads examined; another
+    module has no name for anything in the run.  And X is not fetched as
+    an instruction (2).  So the value stored at X is never read.
+
+    Loads are compared by the bytes they read: ``(A+k)``, with A's offset
+    in the run known, reads A+k, and A+k+1 as well for a register pair.  A
+    load whose address uses a label of the run in any other way (after a
+    ``ds`` of unknown size, ``A+K`` with K a name) may read any byte of it.
+    The text has to be all there is: after a conditional, a macro, an
+    ``include``, a name defined twice or an instruction the optimizer does
+    not know, nothing is taken for unread.
+    """
+
+    def __init__(self, lines: list[str]):
+        self.ok = True
+        self.radix = _radix(lines)
+        self.labels: dict[str, _Place] = {}
+        # name -> (expression, where `$' in it is)
+        self.equates: dict[str, tuple[str, _Place]] = {}
+        # Names set more than once (`defl', `set'): the runs of any value.
+        self.redefined: dict[str, set[tuple[str, int]]] = {}
+        # (segment, run) -> the (start, end) offsets of its ds, db and dw.
+        self.spans: dict[tuple[str, int], list[tuple[int, int]]] = {}
+        self.placed: set[str] = set()
+        self.here: list[_Place] = []
+        self.escaped: set[tuple[str, int]] = set()
+        # (segment, run) -> (start, end) of the bytes loads read there;
+        # and the runs a load may read anything of.
+        self.reads: dict[tuple[str, int], list[tuple[int, int]]] = {}
+        self.unknown: set[tuple[str, int]] = set()
+        uses: list[tuple[str, str, _Place]] = []
+        linked: set[str] = set()
+        seg = "cseg"
+        run: dict[str, int] = {}
+        off: dict[str, int | None] = {}
+        ended = False
+        for raw in lines:
+            here: _Place = (seg, run.setdefault(seg, 0), off.setdefault(seg, 0))
+            self.here.append(here)
+            if ended or not self.ok:
+                continue
+            label, op, operands = _split(raw)
+            if op in _EQUATES and label is not None and (op != "set" or "," not in operands):
+                name = label.lower()
+                if name in self.labels:
+                    self.ok = False
+                elif op == "equ" and name not in self.equates and name not in self.redefined:
+                    self.equates[name] = (operands, here)
+                else:
+                    self.redefined.setdefault(name, set())
+                    uses.append(("set " + name, operands, here))
+                    if name in self.equates:
+                        expr, where = self.equates.pop(name)
+                        uses.append(("set " + name, expr, where))
+                continue
+            if label is not None:
+                name = label.lower()
+                if name in self.labels or name in self.equates or name in self.redefined:
+                    self.ok = False
+                    continue
+                self.labels[name] = here
+                if _exported(raw):
+                    linked.add(name)
+            if op is None:
+                continue
+            if op in _SEGMENTS:
+                seg = op if op != "common" else "common " + operands.lower()
+                continue
+            if op in ("org", ".phase"):
+                self.placed.add(seg)
+                off[seg] = None
+                continue
+            if op == ".dephase":
+                continue
+            if op == "end":
+                ended = True
+                continue
+            if op in BARRIERS:
+                self.ok = False
+                continue
+            if op in _LINKAGE:
+                linked |= _names(operands)
+                continue
+            if op in TRANSPARENT:
+                continue
+            if op in DATA:
+                items = split_operands(operands)
+                for item in items:
+                    uses.append(("escape", item, here))
+                size = data_size(op, items, self.radix)
+                o = off[seg]
+                if o is not None and size is not None:
+                    self.spans.setdefault((seg, run[seg]), []).append((o, o + size))
+                    off[seg] = o + size
+                else:
+                    off[seg] = None
+                continue
+            eff = effect(op, operands, self.radix)
+            if eff is UNKNOWN:
+                self.ok = False
+                continue
+            parts = split_operands(operands)
+            if op == "ld" and len(parts) == 2:
+                d, s = classify(parts[0]), classify(parts[1])
+                if s.kind == "mem_abs":
+                    uses.append(("read2" if d.kind == "r16" else "read1",
+                                 s.text.strip()[1:-1], here))
+                    parts = [parts[0]]
+                elif d.kind == "mem_abs":
+                    parts = [parts[1]]  # a store's address is not read
+            target = eff.target if eff.flow in ("jump", "branch", "call") else None
+            for part in parts:
+                if target is not None and part.strip() == target and _NAME.fullmatch(target):
+                    continue  # where control goes, not a value
+                uses.append(("escape", part, here))
+            # The next run starts after this instruction, and a call's
+            # return address is its start.
+            run[seg] += 1
+            off[seg] = 0
+            if op in ("call", "rst"):
+                self.escaped.add((seg, run[seg]))
+        if not self.ok:
+            return
+        # What a name set more than once may be, with what the names it is
+        # set to may be.
+        grew = True
+        while grew:
+            grew = False
+            for kind, text, here in uses:
+                if kind.startswith("set "):
+                    runs = self._runs(self._place(text, here))
+                    if not runs <= self.redefined[kind[4:]]:
+                        self.redefined[kind[4:]] |= runs
+                        grew = True
+        for kind, text, here in uses:
+            got = self._place(text, here)
+            if kind == "escape":
+                self.escaped |= self._runs(got)
+            elif got is not None and got[0] == "at" and got[1][2] is not None:
+                seg_, run_, o = got[1]
+                width = 2 if kind == "read2" else 1
+                self.reads.setdefault((seg_, run_), []).append((o, o + width))
+            else:
+                self.unknown |= self._runs(got)
+        for name in linked:
+            self.escaped |= self._runs(self._name(name, ("cseg", 0, 0), 0))
+
+    def _place(self, expr: str, here: _Place, depth: int = 0
+               ) -> tuple[str, "_Place | set[tuple[str, int]]"] | None:
+        """Where ``expr`` points: ``("at", place)`` for NAME, NAME+N or
+        NAME-N; ``("runs", runs)`` for anything else that uses labels of
+        the text; None where it uses none (a number, another module's
+        symbol)."""
+        flat = re.sub(r"\s+", "", expr)
+        m = _base_offset(flat.lower(), self.radix)
+        if m is not None:
+            got = self._name(m[0], here, depth)
+            if got is None or got[0] != "at":
+                return got
+            seg, run, off = got[1]
+            return "at", (seg, run, None if off is None else off + m[1])
+        runs: set[tuple[str, int]] = set()
+        for name in _names(flat):
+            runs |= self._runs(self._name(name, here, depth))
+        return ("runs", runs) if runs else None
+
+    def _name(self, name: str, here: _Place, depth: int
+              ) -> tuple[str, "_Place | set[tuple[str, int]]"] | None:
+        if name == "$":
+            return "at", here
+        if name in self.labels:
+            return "at", self.labels[name]
+        if name in self.redefined:
+            return ("runs", self.redefined[name]) if self.redefined[name] else None
+        if name in self.equates:
+            if depth > 20:
+                self.ok = False  # equates that go round
+                return None
+            expr, where = self.equates[name]
+            return self._place(expr, where, depth + 1)
+        return None
+
+    @staticmethod
+    def _runs(got: tuple[str, "_Place | set[tuple[str, int]]"] | None) -> set[tuple[str, int]]:
+        if got is None:
+            return set()
+        if got[0] == "at":
+            return {got[1][:2]}  # type: ignore[index]
+        return set(got[1])  # type: ignore[arg-type]
+
+    def unread(self, line: int, address: str) -> bool:
+        """Is the byte at ``address``, stored to on ``line``, read by
+        nothing afterwards?"""
+        if not self.ok or line >= len(self.here):
+            return False
+        got = self._place(address, self.here[line])
+        if got is None or got[0] != "at" or not self.ok:
+            return False
+        seg, run, off = got[1]  # type: ignore[misc]
+        key = (seg, run)
+        if seg not in ("cseg", "dseg") or seg in self.placed or off is None:
+            return False
+        if key in self.escaped or key in self.unknown:
+            return False
+        if not any(a <= off < b for a, b in self.spans.get(key, ())):
+            return False
+        return not any(a <= off < b for a, b in self.reads.get(key, ()))
 
 
 @dataclass
@@ -1746,15 +2029,16 @@ class PeepholeOptimizer:
           ``var = (a = b)``, where the two arms of the comparison meet at the
           label before the result is stored.
 
-        * Nothing else in the module reads the location.  Scanning only to the
-          end of the procedure is enough for a parameter slot, which no one
-          else can name, and wrong for anything at module scope: another
-          procedure, declared later, reads it perfectly legally.  A location
-          whose address is taken, or which the module exports, is off limits
-          for the same reason.
+        * Nothing reads the byte afterwards, anywhere, by its name or through
+          an address computed from another's: :class:`_Storage` says when
+          that is so.  Scanning only to the end of the procedure is not
+          enough, since another procedure, declared later, reads a location
+          at module scope perfectly legally; nor is looking for its name,
+          since ``pp = .a + 1`` reaches the parameter after ``a``.
         """
         result: list[str] = []
         changed = False
+        storage: _Storage | None = None
         i = 0
 
         while i < len(lines):
@@ -1771,13 +2055,9 @@ class PeepholeOptimizer:
                             parsed[1].startswith("(") and parsed[1].lower().endswith("),a") and
                             classify(parsed[1][:-2]).kind == "mem_abs"):
                         addr = parsed[1][1:-3]  # Extract addr from (addr),a
-
-                        # Check whether anything anywhere in the module reads
-                        # the location, exports it, or takes its address.  The
-                        # store is only dead if nothing does.
-                        addr_loaded = self._addr_is_live(lines, addr, i + 1)
-
-                        if not addr_loaded:
+                        if storage is None:
+                            storage = _Storage(lines)
+                        if storage.unread(i + 1, addr):
                             result.append(line)  # Keep the label
                             i += 2  # Skip the store instruction
                             changed = True
@@ -1788,83 +2068,6 @@ class PeepholeOptimizer:
             i += 1
 
         return result, changed
-
-    def _addr_is_live(self, lines: list[str], addr: str, store_index: int) -> bool:
-        """Does anything outside ``lines[store_index]`` need ``addr``?
-
-        Conservative by construction.  Each name in the address has to be
-        storage this module keeps for itself: defined once, by a ``ds``,
-        ``db`` or ``dw`` on the label's line or after it, and not exported
-        with ``::`` or named by ``public`` (or ``extrn``).  A name the text
-        sets with ``equ`` may be another name for the same bytes (``SLOT equ
-        ALIAS``), or an address something outside the program reads; one not
-        defined here is another module's.  Past that, a line that names the
-        address other than to store to it is a use of it, and so is a load
-        of any byte of it, however the address is spelled (``(BUF+0DH)``,
-        a sixteen-bit load from the byte before).
-        """
-        target = re.sub(r"\s+", "", addr).lower()
-        if not target:
-            return True
-        names = {t for t in re.findall(r"[\w?@$.]+", target) if not t[0].isdigit()}
-        if not names:
-            return True  # an address given as a number
-        radix = _radix(lines)
-        place = _base_offset(target, radix)
-        paren = "(" + target + ")"
-        defined: set[str] = set()
-        for j, raw in enumerate(lines):
-            if j == store_index:
-                continue
-            label, op, operands = _split(raw)
-            if label is not None and label.lower() in names:
-                if _exported(raw) or label.lower() in defined or not self._is_storage(lines, j):
-                    return True
-                defined.add(label.lower())
-            flat = re.sub(r"\s+", "", operands).lower()
-            if not flat:
-                continue
-            if op in _LINKAGE:
-                if names & {t.lower() for t in _IDENT.findall(flat)}:
-                    return True
-                continue
-            if op == "ld" and place is not None:
-                parts = split_operands(flat)
-                if len(parts) == 2:
-                    dst, src = classify(parts[0]), classify(parts[1])
-                    if src.kind == "mem_abs" and dst.kind in ("r8", "r16"):
-                        at = _base_offset(parts[1][1:-1], radix)
-                        if at is None:
-                            if names & {t.lower() for t in _IDENT.findall(parts[1])}:
-                                return True
-                        elif at[0] == place[0] and \
-                                at[1] <= place[1] < at[1] + (2 if dst.kind == "r16" else 1):
-                            return True
-                        continue
-                    if dst.kind == "mem_abs" and src.kind in ("r8", "r16"):
-                        continue  # a store: not a read
-            if target not in flat:
-                continue
-            if op == "ld" and flat.startswith(paren + ","):
-                # A store to it. Not a read.
-                continue
-            # Anything else that names it - a load, an address taken with
-            # `ld hl,NAME', a `dw NAME' in a table, `ALIAS equ NAME' - keeps
-            # it alive.
-            return True
-        return defined != names
-
-    def _is_storage(self, lines: list[str], j: int) -> bool:
-        """Is the label on line ``j`` that of a ``ds``, ``db`` or ``dw``, on
-        its own line or the next that has anything on it?"""
-        _, op, _ = _split(lines[j])
-        k = j + 1
-        while op is None and k < len(lines):
-            label, op, _ = _split(lines[k])
-            if label is not None:
-                return False
-            k += 1
-        return op in DATA
 
     # ---- lines --------------------------------------------------------------
 

@@ -99,8 +99,9 @@ The optimizer runs multiple phases:
 2. **Jump Threading** - Thread through intermediate jumps
 3. **Pattern Matching** once more, for what threading exposed
 4. **Dead Store Elimination** - Remove a parameter's store at procedure
-   entry when nothing reads it, to storage the module defines and does not
-   export
+   entry when nothing can read the byte: no load reads it, and nothing
+   gives an address from which it can be computed, such as that of the
+   variable before it (`ld hl,A / inc hl`)
 5. **Relative Jumps** - Convert jp to jr, and dec b; jp nz to djnz, where the
    target is in reach; last, because it counts bytes
 
