@@ -6,14 +6,17 @@ Each seed is a random Z80 program: straight-line code, forward branches,
 counted loops, calls to subroutines of its own and to the multiply and
 subtract routines uplm80 links in, all built around the instruction
 sequences the optimizer rewrites, with random operands and random code
-before and after them.  The program and its optimized version are run on
+before and after them.  Half of them also call a routine that stores its
+parameter at its entry, between two neighbours in storage the program
+defines, and read the byte or not, by its own name or from a neighbour's
+address.  The program and its optimized version are run on
 :mod:`tests.z80sim` from the same random register, flag and memory states,
 and must end in the same state: every register, every flag (bits 3 and 5
-aside) and all of memory outside the stack below SP.  The program ends in
-``ret`` (or ``jp 0``), where the optimizer has to assume everything is
-live, so a rewrite that changed any register or flag some path could still
-read shows up as a difference.  Every instruction of the optimized program
-must also be one the Z80 has.
+aside) and all of memory outside the stack below SP and that storage.  The
+program ends in ``ret`` (or ``jp 0``), where the optimizer has to assume
+everything is live, so a rewrite that changed any register or flag some
+path could still read shows up as a difference.  Every instruction of the
+optimized program must also be one the Z80 has.
 
 A failing seed prints both programs and the states that differ.
 """
@@ -30,7 +33,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from upeepz80 import PeepholeOptimizer  # noqa: E402
 from upeepz80.z80 import BARRIERS, UNKNOWN, effect, strip_comment  # noqa: E402
-from z80sim import FLAG_MASK, Machine, SimError  # noqa: E402
+from z80sim import DATA_BASE, FLAG_MASK, Machine, SimError  # noqa: E402
 
 VARS = {f"V{i}": 0x8000 + 2 * i for i in range(8)}
 SYMBOLS = dict(VARS, FRAME=0x9000)
@@ -67,6 +70,19 @@ RUNTIME = """\
 \tsbc\thl,de
 \tret
 """
+
+
+# Storage the program may define after its code: PSB is the parameter of
+# the routine PS, stored at its entry, between two neighbours.  A store the
+# optimizer drops leaves its byte different; that byte is not compared,
+# since a read of it shows in what it is read into.
+STORAGE = "\tdseg\nPSA:\tds 1\nPSB:\tds 1\nPSW:\tds 2\n"
+STORAGE_BYTES = range(DATA_BASE, DATA_BASE + 4)
+# What may read PSB after PS stores it: nothing, another byte, or PSB by
+# its own name or from a neighbour's address.
+STORAGE_READS = [[], [], ["ld a,(PSW)"], ["ld a,(PSB)"], ["ld a,(PSA+1)"], ["ld a,(PSW-1)"],
+                 ["ld hl,(PSA)", "ld a,h"], ["ld hl,PSA", "inc hl", "ld a,(hl)"],
+                 ["ld de,PSW", "dec de", "ld a,(de)"], ["ld hl,PSA+1", "ld (V0),hl"]]
 
 
 class Gen:
@@ -420,10 +436,21 @@ class Gen:
         body += [f"{lab}:" for lab in self.pending]
         self.pending = []
         subs += ["??S4:"] + body + ["ret"]
+        # Half the programs call PS first, which stores its parameter; what
+        # reads it, if anything, follows the store or the call.  (A random
+        # stream of its own leaves the rest as it was.)
+        g2 = random.Random(g.random())
+        data = ""
+        if g2.random() < 0.5:
+            reads = g2.choice(STORAGE_READS)
+            inside = g2.random() < 0.5
+            subs += ["PS:", "ld (PSB),a"] + (reads if inside else []) + ["ret"]
+            out = [f"ld a,{g2.randrange(256)}", "call PS"] + ([] if inside else reads) + out
+            data = STORAGE
         text = []
         for line in out + subs:
             text.append(line if line.endswith(":") else "\t" + line)
-        return "\n".join(text) + "\n" + RUNTIME
+        return "\n".join(text) + "\n" + RUNTIME + data
 
 
 def run(src: str, init: dict) -> tuple[str, Machine]:
@@ -488,7 +515,7 @@ def compare(a: Machine, b: Machine) -> list[str]:
     low = min(a.sp, b.sp)
     if a.mem[:STACK_LOW] != b.mem[:STACK_LOW] or a.mem[low:] != b.mem[low:]:
         for addr in list(range(STACK_LOW)) + list(range(low, 0x10000)):
-            if a.mem[addr] != b.mem[addr]:
+            if a.mem[addr] != b.mem[addr] and addr not in STORAGE_BYTES:
                 diffs.append(f"mem[{addr:04X}]: {a.mem[addr]:02X} vs {b.mem[addr]:02X}")
                 if len(diffs) > 12:
                     break

@@ -94,6 +94,11 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   SP, three ways each, a store between `push af` and `pop af`, and the
   tail call above. Each runs the code before and after optimization, and
   fails on 0.2.5.
+- `tests/peepfuzz.py`: half the programs now also call a routine that
+  stores its parameter at its entry, between two neighbours in storage the
+  program defines, and then read the byte or not, by its own name or from
+  a neighbour's address. The stored byte itself is not compared. 0.2.5
+  differs on 69 of the first 400 programs; this release on none of 3,000.
 
 ### Known issues
 
