@@ -32,6 +32,16 @@ def test_the_interpreter_lays_out_data_as_an_assembler_does():
     assert (m.r["d"] << 8 | m.r["e"]) == DATA_BASE + 2
 
 
+def test_the_interpreter_reads_low_and_high_as_m80_writes_them():
+    """`LOW B' and `HIGH B' are M80's operators, written with a space."""
+    src = ("\tld a,HIGH B\n\tld h,a\n\tld a,LOW B\n\tld l,a\n\tld de,(T)\n\tret\n"
+           "\tdseg\nA:\tds 2\nB:\tds 1\nT:\tdb LOW(B), high  B\n")
+    m = Machine(src)
+    assert m.run() == "ret"
+    assert (m.r["h"] << 8 | m.r["l"]) == DATA_BASE + 2
+    assert (m.r["d"] << 8 | m.r["e"]) == DATA_BASE + 2
+
+
 # ---- the program uplm80's storage work found -----------------------------------
 
 # uplm80 0.3.7 (without its workaround) at -O2, what it hands the optimizer

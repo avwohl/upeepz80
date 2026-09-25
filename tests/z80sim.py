@@ -170,8 +170,9 @@ class Machine:
 
     # ---- values -----------------------------------------------------------
     def eval(self, expr: str) -> int:
-        """An operand expression: numbers, symbols, labels, + and -."""
-        s = expr.strip()
+        """An operand expression: numbers, symbols, labels, + and -, and
+        ``LOW``, ``HIGH`` of a term, as ``LOW(x)`` or M80's ``LOW x``."""
+        s = re.sub(r"(?i)(?<![\w?@$.])(low|high)\s+([\w?@$.]+)", r"\1(\2)", expr.strip())
         if not s:
             raise SimError("empty expression")
         total = 0
