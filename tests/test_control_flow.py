@@ -5,7 +5,7 @@ import pytest
 
 from upeepz80 import optimize
 
-from tests._equiv import assert_equivalent
+from tests._equiv import assert_equivalent, instrs
 
 
 @pytest.mark.parametrize("src", [
@@ -40,3 +40,29 @@ def test_dead_store_read_as_part_of_a_word_is_kept():
     assert "(??AUTO+1),a" in optimize(src)
     src = "P:\n\tld (??AUTO+3),a\n\tret\nQ:\n\tld a,(??AUTO+2)\n\tret\n"
     assert "(??AUTO+3),a" not in optimize(src)
+
+
+# ---- `NAME::' is M80's way to write a PUBLIC label ------------------------------
+
+def test_a_routine_exported_with_double_colon_returns_anywhere():
+    """`foo::' exports foo, so another module may call it and read HL after
+    it returns.  The routine counted as closed, returning only to the call
+    in this module, and `ld hl,5 / ld a,l' became `ld a,5'."""
+    src = "\tcall foo\n\tld hl,0\n\tret\nfoo::\n\tld hl,5\n\tld a,l\n\tret\n"
+    out = assert_equivalent(src, entry="\tcall foo\n\tjp 0\n")
+    assert "ld hl,5" in instrs(out)
+    # Spelled `public foo' and `foo:', it was already left alone.
+    out = optimize("\tpublic foo\n" + src.replace("foo::", "foo:"))
+    assert "ld hl,5" in instrs(out)
+
+
+def test_a_label_exported_with_double_colon_is_kept():
+    """Jump threading removed `bar:: jp L2' as a label nothing names, and a
+    module that calls bar no longer linked."""
+    src = "\tld a,1\n\tjp L2\nbar::\tjp L2\nL2:\tret\n"
+    out = assert_equivalent(src, entry="\tld a,7\n\tcall bar\n\tjp 0\n")
+    assert any(line.startswith("bar::") for line in out.split("\n")), out
+    # Alone on its line, with the jump on the next.
+    src = "\tld a,1\n\tjp L2\nbar::\n\tjp L2\nL2:\tret\n"
+    out = assert_equivalent(src, entry="\tld a,7\n\tcall bar\n\tjp 0\n")
+    assert "bar::" in out.split("\n"), out

@@ -34,15 +34,18 @@ def state(m: Machine) -> dict:
                 mem=bytes(m.mem[:0xE000]))
 
 
-def assert_equivalent(src: str, states: int = 40) -> str:
-    """Optimize ``src``; the result must be valid and do what ``src`` does."""
+def assert_equivalent(src: str, states: int = 40, entry: str = "") -> str:
+    """Optimize ``src``; the result must be valid and do what ``src`` does.
+
+    ``entry`` is code run first, outside what is optimized: another module's
+    way in, such as ``jp NAME`` to a label ``src`` exports."""
     out = optimize(src)
     assert not invalid_instructions(out), out
     rng = random.Random(1)
     for _ in range(states):
         seed = rng.randrange(1 << 30)
-        before = state(run(src, random.Random(seed)))
-        after = state(run(out, random.Random(seed)))
+        before = state(run(entry + src, random.Random(seed)))
+        after = state(run(entry + out, random.Random(seed)))
         diff = {k: (before[k], after[k]) for k in before if before[k] != after[k] and k != "mem"}
         if before["mem"] != after["mem"]:
             diff["mem"] = [hex(i) for i in range(0xE000) if before["mem"][i] != after["mem"][i]][:8]

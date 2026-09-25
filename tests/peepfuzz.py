@@ -389,7 +389,9 @@ class Gen:
             body += [g.choice(["cp b", "or a", "xor a", "inc a", "scf", "and 0fh", "nop"])]
             body += [f"{lab}:" for lab in self.pending]
             self.pending = []
-            subs += [f"{name}:"] + body + ["ret"]
+            # ??S2 may be exported, and so entered from outside as well
+            colon = "::" if name == "??S2" and g.random() < 0.3 else ":"
+            subs += [f"{name}{colon}"] + body + ["ret"]
         text = []
         for line in out + subs:
             text.append(line if line.endswith(":") else "\t" + line)
@@ -473,7 +475,7 @@ def invalid_instructions(asm: str) -> list[str]:
         if text and not text[0].isspace():
             if ":" not in text:
                 continue
-            body = text.split(":", 1)[1]
+            body = text.split(":", 1)[1].removeprefix(":")
         body = body.strip()
         if not body:
             continue
@@ -491,26 +493,31 @@ def check(seed: int, size: int = 12, states: int = 6) -> str | None:
     bad = invalid_instructions(opt)
     if bad:
         return f"seed {seed}: not Z80 instructions: {bad}\n--- original\n{src}\n--- optimized\n{opt}"
+    # An exported routine is also run as another module would: called, and
+    # everything it leaves compared.  (The call is not part of what is
+    # optimized.)
+    entries = [""] + (["\tcall ??S2\n\tjp 0\n"] if "??S2::" in src else [])
     ran = 0
     for _ in range(states):
         init = random_state(rng)
-        try:
-            how0, m0 = run(src, init)
-        except SimError:
-            continue
-        if how0 in ("timeout", "end"):
-            continue
-        ran += 1
-        try:
-            how1, m1 = run(opt, init)
-        except SimError as exc:
-            return f"seed {seed}: optimized program failed: {exc}\n--- original\n{src}\n--- optimized\n{opt}"
-        diffs = compare(m0, m1)
-        if how0 != how1:
-            diffs.insert(0, f"ended by {how0} vs {how1}")
-        if diffs:
-            return (f"seed {seed}: " + "; ".join(diffs[:8]) +
-                    f"\n--- original\n{src}\n--- optimized\n{opt}")
+        for entry in entries:
+            try:
+                how0, m0 = run(entry + src, init)
+            except SimError:
+                continue
+            if how0 in ("timeout", "end"):
+                continue
+            ran += 1
+            try:
+                how1, m1 = run(entry + opt, init)
+            except SimError as exc:
+                return f"seed {seed}: optimized program failed: {exc}\n--- original\n{src}\n--- optimized\n{opt}"
+            diffs = compare(m0, m1)
+            if how0 != how1:
+                diffs.insert(0, f"ended by {how0} vs {how1}")
+            if diffs:
+                return (f"seed {seed}{' entered by ' + entry.split(chr(10))[0].strip() if entry else ''}: " +
+                        "; ".join(diffs[:8]) + f"\n--- original\n{src}\n--- optimized\n{opt}")
     return None
 
 

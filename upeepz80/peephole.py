@@ -51,6 +51,8 @@ _MUL16 = ("??mul16", "@mul16", "__mul16")
 _SUBDE = ("??subde", "@subde")
 
 _LABEL = re.compile(r"^([A-Za-z_?@$.][\w?@$.]*)(::?)?(.*)$")
+# `NAME::' is M80's way to define a label and make it PUBLIC in one.
+_EXPORTED = re.compile(r"^([A-Za-z_?@$.][\w?@$.]*)::")
 _IDENT = re.compile(r"[A-Za-z_?@$.][\w?@$.]*")
 _SWAP = {"d": "h", "e": "l", "h": "d", "l": "e"}
 # Directives that give a name a value.  Only an `equ' gives it one value
@@ -83,6 +85,12 @@ def _split(line: str) -> tuple[str | None, str | None, str]:
     return label, parts[0].lower(), operands
 
 
+def _exported(line: str) -> str | None:
+    """The label ``line`` defines with ``::``, which exports it, or None."""
+    m = _EXPORTED.match(line)
+    return m.group(1) if m else None
+
+
 def _same_operand(a: str, b: str) -> bool:
     return a.replace(" ", "").lower() == b.replace(" ", "").lower()
 
@@ -106,14 +114,14 @@ class _Routines:
     """Where each line's ``ret`` goes, and how deep the stack is there.
 
     A routine is a label that a ``call`` names and nothing else does - no
-    ``ld hl,L``, ``dw L``, ``public L`` or ``X equ L``, and no jump spelled
-    differently from the label.  Its code is what can be reached from the
-    label without going into a call.  A ``ret`` in code that only routines
-    reach returns to the line after one of their calls.  Code that can be
-    reached any other way - from the first line, from a label something
-    names, from after data, a directive, ``jp (hl)`` or an instruction not
-    recognised - may have been entered from anywhere, and so may its ``ret``
-    go anywhere.
+    ``ld hl,L``, ``dw L``, ``public L``, ``L::`` or ``X equ L``, and no jump
+    spelled differently from the label.  Its code is what can be reached
+    from the label without going into a call.  A ``ret`` in code that only
+    routines reach returns to the line after one of their calls.  Code that
+    can be reached any other way - from the first line, from a label
+    something names or the module exports, from after data, a directive,
+    ``jp (hl)`` or an instruction not recognised - may have been entered
+    from anywhere, and so may its ``ret`` go anywhere.
 
     ``height`` is the number of pushes outstanding since the routine was
     entered, where every way to a line agrees on it, else None.
@@ -143,7 +151,8 @@ class _Routines:
                     self.calls.setdefault(t, []).append(idx + 1)
         open_roots = {0}
         for name, idx in code.label_lines:
-            if name.lower() in named or code.labels.get(name) is None:
+            if name.lower() in named or name.lower() in code.exported or \
+                    code.labels.get(name) is None:
                 open_roots.add(idx)
         for idx, eff in enumerate(effects):
             if eff is not None and eff.flow in ("stop", "data"):
@@ -231,8 +240,13 @@ class _Code:
         self.labels: dict[str, int | None] = {}
         self.label_lines: list[tuple[str, int]] = []
         self.equ: dict[str, int] = {}
+        # Labels defined with `::', lowercase.
+        self.exported: set[str] = set()
         seen_equ: set[str] = set()
         for idx, line in enumerate(lines):
+            name = _exported(line)
+            if name:
+                self.exported.add(name.lower())
             label, op, operands = _split(line)
             if op in _EQUATES and label and (op != "set" or "," not in operands):
                 v = parse_number(operands)
@@ -1510,9 +1524,13 @@ class PeepholeOptimizer:
                 result.append(line)
 
         # What names each label: any mention of it outside its definition,
-        # in any instruction or directive, counts.
+        # in any instruction or directive, counts, and so does `NAME::',
+        # which exports it.
         refs: dict[str, int] = {}
         for line in result:
+            name = _exported(line)
+            if name:
+                refs[name.lower()] = refs.get(name.lower(), 0) + 1
             label, op, operands = _split(line)
             if op is None:
                 continue
