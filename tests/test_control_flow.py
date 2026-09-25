@@ -6,6 +6,17 @@ import pytest
 from upeepz80 import optimize
 
 from tests._equiv import assert_equivalent, instrs
+from tests.z80sim import Machine
+
+
+def test_the_interpreter_jumps_to_a_name_an_equate_sets_to_code():
+    """`ALIAS equ RTN' names RTN's address: a jump or call to ALIAS goes
+    there, as it does on an assembler."""
+    src = "\tcall ALIAS\n\tjp ALIAS\nALIAS\tequ RTN\nRTN:\n\tinc a\n\tret\n"
+    m = Machine(src)
+    m.r["a"] = 1
+    assert m.run() == "ret"
+    assert m.r["a"] == 3
 
 
 @pytest.mark.parametrize("src", [

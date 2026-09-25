@@ -287,6 +287,11 @@ class Machine:
         v = parse_number(low)
         if v == 0:
             return None  # jp 0: warm boot, the end
+        if v is None:
+            # A name an equate sets to a label of code (`ALIAS equ RTN').
+            v = self.eval(label)
+            if CODE_BASE <= v < CODE_BASE + len(self.lines):
+                return v - CODE_BASE
         raise SimError(f"jump to unknown {label}")
 
     # ---- ALU -------------------------------------------------------------
