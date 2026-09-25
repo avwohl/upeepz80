@@ -1384,7 +1384,8 @@ class PeepholeOptimizer:
                 condition=lambda ops: ops[1][1].startswith("(") and ops[1][1].lower().endswith("),hl"),
             ),
             # push af; ld (addr),a; pop af -> ld (addr),a
-            # Saving/restoring A around a store of A is pointless
+            # Saving/restoring A around a store of A is pointless (see
+            # _optimize_pass for a store through a register)
             PeepholePattern(
                 name="push_sta_pop",
                 pattern=[("push", "af"), ("ld", None), ("pop", "af")],
@@ -1664,6 +1665,12 @@ class PeepholeOptimizer:
                 # where it looked for its own.  One of this text's that
                 # takes it off the stack has to be called.
                 if pattern.name == "tail_call" and code.moves_return(instrs[0][1]):
+                    continue
+                # A store through a register may land in the slot the push
+                # fills, where the text makes a pointer from SP, and change
+                # the flags the pop takes back.
+                if pattern.name == "push_sta_pop" and code.stack_pointer and \
+                        classify(split_operands(instrs[1][1])[0]).kind != "mem_abs":
                     continue
 
                 # Pattern matched!

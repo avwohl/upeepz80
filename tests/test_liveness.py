@@ -237,6 +237,19 @@ def test_a_pushed_value_where_nothing_makes_a_pointer_from_sp():
     assert "ld a,02Ch" in instrs(out)
 
 
+def test_a_store_through_a_pointer_between_push_af_and_pop_af():
+    """`push af / ld (hl),a / pop af' is `ld (hl),a' unless HL points at
+    the slot the push fills, where the store changes the flags the pop
+    takes back.  Where the text makes a pointer from SP, it may."""
+    src = ("\tld hl,0\n\tadd hl,sp\n\tdec hl\n\tdec hl\n\tld a,5\n\tscf\n"
+           "\tpush af\n\tld (hl),a\n\tpop af\n\tret\n")
+    out = assert_equivalent(src)
+    assert "push af" in instrs(out)
+    src = "\tld hl,W\n\tld a,5\n\tscf\n\tpush af\n\tld (hl),a\n\tpop af\n\tret\n"
+    out = assert_equivalent(src)
+    assert "push af" not in instrs(out)
+
+
 def test_dead_store_named_by_an_equ_is_kept():
     """`ALIAS: EQU PARAM' (uplm80's form for AT) names the location, and a
     read of ALIAS reads it."""

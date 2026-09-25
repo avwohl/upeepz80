@@ -52,6 +52,12 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   Another module is taken not to reach below the SP that it calls with.
   On the corpus this costs 13 `cp 0` → `or a` and one `ld a,0` → `xor
   a`, 14 bytes in six outputs.
+- **`push af / ld (hl),a / pop af` became `ld (hl),a`,** although HL can
+  point at the slot the push fills. There the store changes the flags that
+  the pop takes back. Where the text makes a pointer from SP, the pair is
+  now kept around a store through a register. A store to an address the
+  text gives is not to the stack (see Known issues). This changes nothing
+  on the corpus.
 - **A routine that changes its return address through a pointer made from
   SP was taken to return to its call.** 0.2.5 listed this as a known
   issue. `P: ld hl,0 / add hl,sp / ld de,THERE / ld (hl),e / inc hl / ld
@@ -85,8 +91,30 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   after A.
 - `tests/test_liveness.py` and `tests/test_control_flow.py`: a pushed
   value read, and a return address changed, through a pointer made from
-  SP, three ways each, and the tail call above. Each runs the code before
-  and after optimization, and fails on 0.2.5.
+  SP, three ways each, a store between `push af` and `pop af`, and the
+  tail call above. Each runs the code before and after optimization, and
+  fails on 0.2.5.
+
+### Known issues
+
+- **The stack is taken to be reached only relative to SP:** by `pop`,
+  `ret`, `ex (sp)`, and pointers made from SP. An address that the text
+  gives, a label or a number, is taken not to be a slot on the stack. The
+  optimizer changes how deep the stack is where a routine runs (a tail
+  call runs it one return address higher), and what is below SP (it
+  removes a `push` with its `pop`). So `push hl / ld hl,(x) / ex de,hl /
+  pop hl` → `ld de,(x)`, and `push hl / ld (x),hl / pop hl` and `push af /
+  ld (x),a / pop af` → the instruction in the middle, assume that x is not
+  the slot the push fills. Code outside the text is taken to change no
+  return address but its own, and not to reach below the SP it is called
+  with.
+- **A program is taken not to depend on the size of its code,** which
+  every rewrite changes. Dead-store elimination relies on this: an
+  address is not computed across an instruction. A table of `jp`
+  instructions entered at a computed offset, such as a BIOS's jump
+  vector (`BIOS+3`), does depend on it. Relative jumps break it: `BIOS:
+  jp BOOT / jp WBOOT` becomes `BIOS: jr BOOT / jr WBOOT`, as in 0.2.5.
+  uplm80 writes such tables as `dw` lists, which are not changed.
 
 ## 0.2.5 - 2026-09-25
 
