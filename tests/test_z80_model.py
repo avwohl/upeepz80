@@ -172,7 +172,8 @@ def test_data_sizes_agree_with_the_assembler():
                            capture_output=True, text=True)
         assert r.returncode == 0, r.stdout + r.stderr
         sym = open(os.path.join(d, "D.SYM")).read()
-    at = {name.lower(): int(value, 16) for value, name in re.findall(r"([0-9A-F]{4})\s+(L\d+)", sym)}
+    at = {name.lower(): int(value, 16)
+          for value, name in re.findall(r"([0-9A-F]{4})\s+(L\d+)", sym)}
     wrong = []
     for n, t in enumerate(lines):
         size = data_model(t)

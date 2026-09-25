@@ -140,7 +140,8 @@ def test_a_return_address_changed_by_code_reached_where_it_cannot_be_followed(sr
 
 # SWAP puts THERE in place of its caller's return address: it takes its own
 # off the stack, and its caller's, and puts its own back.
-SWAP = "SWAP:\n\tpop hl\n\tpop de\n\tld de,THERE\n\tpush de\n\tpush hl\n\tret\nTHERE:\n\tld a,1\n\tret\n"
+SWAP = ("SWAP:\n\tpop hl\n\tpop de\n\tld de,THERE\n\tpush de\n\tpush hl\n\tret\n"
+        "THERE:\n\tld a,1\n\tret\n")
 SWAP_MAIN = "START:\n\tcall QQ\n\tld hl,0\n\tld de,0\n\tjp 0\n"
 
 
