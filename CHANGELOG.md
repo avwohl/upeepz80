@@ -164,6 +164,21 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   not known. But one that leaves by a jump was not taken to read or
   change anything above its return address. No tail call is now made to
   a routine that calls an irregular one. Nothing changes on the corpus.
+- **`push bc / ld hl,HND / jp (hl)`, with `HND: call SHOWP / ret`, became
+  `... HND: jp SHOWP`,** as in 0.2.5. HND's stack height, counted from its
+  label, is 0, but BC is on the stack. It was pushed for SHOWP, which
+  takes its argument off the stack; jumped to, SHOWP took the return
+  address of HND's caller for it. So it was with `jp (ix)`, with `jp
+  ALIAS` where `ALIAS equ HND`, with a `ret` to what was pushed where more
+  than that is on the stack (`push bc / ld hl,HND / push hl / ret`), and
+  with `push bc / jp $+3`, where the line after the jump counted as
+  reached by nothing. Now, where code goes where the optimizer cannot
+  follow with something of its own on the stack - a height other than 0,
+  or not known; other than 1 at a `ret` - no tail call is made in code
+  that a label something names, or anything but a `call`, may enter. The
+  line after an instruction that uses `$` is taken to be entered so.
+  Nothing changes on the corpus: its only such jumps are the `jp (hl)` of
+  PIP's `DO CASE`, made with nothing pushed.
 
 ### Added
 
@@ -218,6 +233,16 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   every routine that calls out of the text, where the text makes such a
   pointer, to read above its return address costs 16 bytes in four outputs
   of the corpus.
+- **A `ret` where the stack height is not known, or from a routine that
+  may have changed its return address, is taken to go back to a call.**
+  It may go to a label with what its routine's caller pushed still on the
+  stack: `push bc / ld hl,HND / call DSP` with `DSP: ex (sp),hl / ret`
+  goes to HND with BC on top, and `HND: call SHOWP / ret` still becomes
+  `jp SHOWP`. The height is not known after `ld sp,hl`, or a call of a
+  routine that takes its return address off the stack. And where the text
+  makes a pointer from SP, a routine that writes through a pointer may
+  have changed its return address. Taking every such `ret` to leave
+  something pushed would cost 53 bytes on the corpus, in 12 outputs.
 - **A program is taken not to depend on the size of its code,** which
   every rewrite changes. Dead-store elimination relies on this: an
   address is not computed across an instruction. A table of `jp`

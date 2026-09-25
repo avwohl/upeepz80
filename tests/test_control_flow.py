@@ -274,6 +274,48 @@ def test_no_tail_call_where_the_caller_may_have_pushed():
     assert "call EXT" not in instrs(optimize("\textrn EXT\n\tjp 0\nP:\n\tcall EXT\n\tret\n"))
 
 
+# SHOWP, of another module, takes its argument off the stack, as SHOWP above.
+SHOWP = ("\tjp START\nSHOWP:\n\tpop hl\n\tpop de\n\tpush hl\n\tld a,e\n\tld (@B),a\n\tret\n"
+         "SHOW0:\n\tld a,c\n\tld (@B),a\n\tret\n")
+SHOWP_MAIN = "START:\n\tld bc,5A5Ah\n\tcall QQ\n\tld hl,0\n\tld de,0\n\tjp 0\n"
+
+
+@pytest.mark.parametrize("way", [
+    "\tld hl,HND\n\tjp (hl)\n",
+    "\tld ix,HND\n\tjp (ix)\n",
+    "\tld hl,(TBL)\n\tjp (hl)\nTBL:\tdw HND\n",
+    "\tld hl,HND\n\tpush hl\n\tret\n",
+    "\tjp ALIAS\nALIAS\tequ HND\n",
+    "\tjp HND\n",  # followed: HND's height is 1, as 0.2.5 had it
+])
+def test_no_tail_call_where_a_jump_not_followed_leaves_an_argument_pushed(way):
+    """QQ pushes SHOWP's argument, and goes on to HND where the optimizer
+    does not follow it.  HND's height, counted from its label, is 0, but
+    what QQ pushed is on the stack: `call SHOWP / ret' as `jp SHOWP' would
+    take QQ's return address for the argument."""
+    src = SHOWP_MAIN + "QQ:\n\tpush bc\n" + way + "HND:\n\tcall SHOWP\n\tret\n"
+    out = assert_equivalent(src, entry=SHOWP)
+    assert "call SHOWP" in instrs(out), out
+
+
+def test_no_tail_call_after_a_jump_past_itself_with_an_argument_pushed():
+    """`jp $+3' goes to the line after it, which is not followed."""
+    out = optimize("\textrn SHOWP\nQQ::\n\tpush bc\n\tjp $+3\n\tcall SHOWP\n\tret\n")
+    assert "call SHOWP" in instrs(out), out
+
+
+@pytest.mark.parametrize("way", [
+    "\tld hl,HND\n\tjp (hl)\n",
+    "\tld hl,HND\n\tpush hl\n\tret\n",
+])
+def test_a_tail_call_where_a_jump_not_followed_leaves_nothing_pushed(way):
+    """Where every such jump is made with nothing pushed, the height from
+    HND's label is exact."""
+    src = SHOWP_MAIN + "QQ:\n" + way + "HND:\n\tcall SHOW0\n\tret\n"
+    out = assert_equivalent(src, entry=SHOWP)
+    assert "jp SHOW0" in instrs(out), out
+
+
 def test_a_routine_that_writes_through_a_pointer_where_none_is_made_from_sp():
     """Where the text makes no pointer from SP, a write through a pointer
     does not reach a return address, and P's `ret' goes back to its call."""

@@ -242,11 +242,11 @@ class _Routines:
     ``peeks``.  So does code that calls an irregular routine, which may
     have read or moved the word above its own return address: its
     caller's.  (A caller that then returns is irregular itself; one that
-    leaves by a jump is not.)  A pointer into the stack is taken to come from this text,
-    or from a module that calls it, which does not reach below the SP it
-    calls with - not from a module this text calls, which hands none
-    back, and reads nothing above its own return address through one it
-    is handed.
+    leaves by a jump is not.)  A pointer into the stack is taken to come
+    from this text, or from a module that calls it, which does not reach
+    below the SP it calls with - not from a module this text calls, which
+    hands none back, and reads nothing above its own return address
+    through one it is handed.
 
     Code that goes on where it cannot be followed may run any code, this
     text's or another's: ``jp (hl)``, ``jp (ix)``, ``jp (iy)``, a ``ret``
@@ -257,6 +257,20 @@ class _Routines:
     :meth:`_Code.unfollowed`).  That code may take its caller's return
     address off the stack, or change it through a pointer, so the routine
     is irregular; and it may read above its return address, so it peeks.
+    ``$`` there is an address on either side of the instruction, and the
+    line after it is taken to be entered from anywhere, as a label that
+    something names is.
+
+    Where code goes on like that with something of its own on the stack -
+    a height other than 0 or not known, or other than 1 at a ``ret`` to
+    what it pushed (``push bc / ld hl,HND / jp (hl)``, ``push bc / push hl
+    / ret``) - the code it goes to finds that on the stack, where the
+    height counted from its label, 0, says nothing is.  It may be any code
+    entered from anywhere: where the text has such a jump, ``enters_pushed``
+    is set, and :meth:`pushed` holds for all of that code.  (A ``ret``
+    where the height is not known, and one from code that may have moved
+    its return address, are taken to go back to a call: see Known
+    issues.)
     """
 
     def __init__(self, code: "_Code"):
@@ -289,6 +303,9 @@ class _Routines:
         for idx, eff in enumerate(effects):
             if eff is not None and eff.flow in ("stop", "data"):
                 open_roots.add(idx + 1)
+            elif eff is not None and "$" in code.lines[idx] and \
+                    "$" in _names(_split(code.lines[idx])[2]):
+                open_roots.add(idx + 1)  # `jp $+3'
 
         def successors(i: int) -> list[int]:
             eff = effects[i]
@@ -393,6 +410,24 @@ class _Routines:
             for i in reach[root]:
                 self.wild[i] = True
 
+        # Code that goes where it cannot be followed with something of its
+        # own on the stack (see the docstring).
+        def goes_pushed(i: int) -> bool:
+            eff = effects[i]
+            if eff is None or not (self.open[i] or self.entries[i]):
+                return False
+            h = height[i]
+            if eff.flow == "return" or (eff.flow == "stop" and _split(code.lines[i])[1] in
+                                        ("reti", "retn")):
+                return h is not None and h > 1  # it takes one word, where it goes
+            if eff.flow in ("stop", "data") or (
+                    eff.flow in ("jump", "branch") and eff.target is not None and
+                    code.unfollowed(eff.target)):
+                return h is None or h > 0
+            return False
+
+        self.enters_pushed = any(goes_pushed(i) for i in range(n))
+
     @staticmethod
     def _heights(code: "_Code", roots: list[int], successors: Callable[[int], list[int]],
                  unbalanced: set[int]) -> list[int | None]:
@@ -442,9 +477,13 @@ class _Routines:
 
     def pushed(self, i: int) -> bool:
         """May the stack hold more at line ``i`` than where its routine was
-        entered: is the height there other than 0, or not known?  (Not at a
-        line nothing reaches.)"""
-        return self.height[i] != 0 and (self.open[i] or bool(self.entries[i]))
+        entered: is the height there other than 0, or not known?  Or, where
+        code goes where it cannot be followed with something pushed, may
+        line ``i`` be entered from anywhere?  (Not at a line nothing
+        reaches.)"""
+        if not (self.open[i] or self.entries[i]):
+            return False
+        return self.height[i] != 0 or (self.open[i] and self.enters_pushed)
 
     def continuations(self, i: int) -> list[int] | None:
         """The lines a ``ret`` at line ``i`` may return to, or None if any."""
