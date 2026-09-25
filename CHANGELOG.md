@@ -52,6 +52,29 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   Another module is taken not to reach below the SP that it calls with.
   On the corpus this costs 13 `cp 0` → `or a` and one `ld a,0` → `xor
   a`, 14 bytes in six outputs.
+- **A routine that changes its return address through a pointer made from
+  SP was taken to return to its call.** 0.2.5 listed this as a known
+  issue. `P: ld hl,0 / add hl,sp / ld de,THERE / ld (hl),e / inc hl / ld
+  (hl),d / ld a,0 / ret` returns to THERE. Its `ret` was followed to the
+  line after `call P`, where `cp b` writes the flags, so `ld a,0` became
+  `xor a`, and THERE read the zero flag that `xor a` sets. Now, where the
+  text makes a pointer from SP anywhere, a routine that writes through a
+  pointer, or calls one that does, may return anywhere. Another routine
+  may have made the pointer and kept it (`ld (W),sp`), or a routine it
+  calls may use it on the caller's return address. Where the text makes
+  no such pointer, nothing changes.
+- **`call x / ret` became `jp x` for a routine that reads what is above
+  its return address.** 0.2.5 listed this as a known issue too. `RD: ld
+  hl,4 / add hl,sp / ld a,(hl)` reads the word pushed before its caller
+  was called. Jumped to, it finds one return address fewer on the stack,
+  and reads another word. No tail call is now made to a routine that
+  makes a pointer from SP, or that calls one that does.
+
+  Together these two cost 85 bytes on the corpus, in nine outputs: 30 `ld
+  a,0` → `xor a`, 22 tail calls, 18 `cp 0` → `or a`, 7 relative jumps, 4
+  `ld hl,n / ld r,l` and one threaded jump. 61 of the bytes are in 80un's
+  two programs of several modules, whose procedures take their
+  parameters on the stack and read them with `ld hl,2 / add hl,sp`.
 
 ### Added
 
@@ -60,9 +83,10 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   its 40 tests fail on 0.2.5. `tests/z80sim.py` now lays out the data a
   text defines as an assembler does, so that `ld hl,A+1` finds the byte
   after A.
-- `tests/test_liveness.py`: a pushed value read through a pointer made
-  from SP, three ways, each run before and after optimization; they fail
-  on 0.2.5.
+- `tests/test_liveness.py` and `tests/test_control_flow.py`: a pushed
+  value read, and a return address changed, through a pointer made from
+  SP, three ways each, and the tail call above. Each runs the code before
+  and after optimization, and fails on 0.2.5.
 
 ## 0.2.5 - 2026-09-25
 

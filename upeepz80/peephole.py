@@ -183,6 +183,28 @@ def _reads_through_pointer(op: str | None, operands: str) -> bool:
     return False
 
 
+# Instructions that write memory at the address a register holds without
+# naming it, and those that write the operand they name.
+_BLOCK_WRITES = frozenset({"ldi", "ldd", "ldir", "lddr", "ini", "ind", "inir", "indr",
+                           "rld", "rrd"})
+_WRITE_OPERAND = frozenset({"inc", "dec", "rlc", "rrc", "rl", "rr", "sla", "sra", "srl",
+                            "sll", "sl1", "set", "res"})
+
+
+def _writes_through_pointer(op: str | None, operands: str) -> bool:
+    """Does the instruction write memory at an address that HL, BC, DE, IX
+    or IY holds?"""
+    if op is None:
+        return False
+    if op in _BLOCK_WRITES:
+        return True
+    if op != "ld" and op not in _WRITE_OPERAND:
+        return False
+    parts = split_operands(operands)
+    target = parts[0] if op == "ld" else parts[-1] if parts else ""
+    return classify(target).kind in ("mem_hl", "mem_bc", "mem_de", "mem_idx")
+
+
 class _Routines:
     """Where each line's ``ret`` goes, and how deep the stack is there.
 
@@ -208,6 +230,16 @@ class _Routines:
     where the height is not known, may come back to its call with the stack
     as it pleases: they are ``irregular``, and the height after a call of
     one is not known.
+
+    Where the text makes a pointer from SP anywhere (``ld hl,0 / add
+    hl,sp``, ``ld (nn),sp``), the pointer may be kept or passed on, and
+    code that writes through a pointer, or calls code that does, may write
+    another return address over its own (``ld (hl),e``): it is wild too,
+    though it comes back as high on the stack as it went.  Code that makes
+    such a pointer, or calls code that does, may read what is above its
+    return address, which a tail call changes: it ``peeks``.  A pointer
+    into the stack is taken to come from this text, or from a module that
+    calls it, which does not reach below the SP it calls with.
     """
 
     def __init__(self, code: "_Code"):
@@ -293,8 +325,31 @@ class _Routines:
             unbalanced |= more
         self.height: list[int | None] = height
         self.irregular = irregular
+        # Pointers made from SP: code that makes one, or calls code that
+        # does, peeks; where the text makes one anywhere, code that writes
+        # through a pointer, or calls code that does, is wild.
+        callees = {root: {code.target(effects[i].target) for i in reach[root]
+                          if effects[i] is not None and effects[i].flow == "call"}
+                   for root in roots}
+
+        def closed_over_calls(found: set[int]) -> set[int]:
+            grew = True
+            while grew:
+                grew = False
+                for root in roots:
+                    if root not in found and callees[root] & found:
+                        found.add(root)
+                        grew = True
+            return found
+
+        self.peeks = closed_over_calls(
+            {root for root in roots if any(code.stack_pointers[i] for i in reach[root])})
+        writes: set[int] = set()
+        if code.stack_pointer:
+            writes = closed_over_calls(
+                {root for root in roots if any(code.pointer_writes[i] for i in reach[root])})
         self.wild = [False] * (n + 1)
-        for root in wild:
+        for root in wild | writes:
             for i in reach[root]:
                 self.wild[i] = True
 
@@ -363,8 +418,11 @@ class _Code:
         self.effects: list[Effect | None] = []
         # Lines that read memory through a register (_reads_through_pointer).
         self.pointer_reads: list[bool] = []
-        # Does any line make a pointer into the stack from SP?
+        # Lines that make a pointer into the stack from SP, and whether any
+        # line does; lines that write memory through a register.
+        self.stack_pointers: list[bool] = []
         self.stack_pointer = False
+        self.pointer_writes: list[bool] = []
         self.labels: dict[str, int | None] = {}
         self.label_lines: list[tuple[str, int]] = []
         self.equ: dict[str, int] = {}
@@ -392,6 +450,8 @@ class _Code:
                 seen_equ.add(label)
                 self.effects.append(None)
                 self.pointer_reads.append(False)
+                self.stack_pointers.append(False)
+                self.pointer_writes.append(False)
                 continue
             if label:
                 # A label defined twice is nowhere in particular.
@@ -400,7 +460,9 @@ class _Code:
             eff = None if op is None else effect(op, operands, self.radix)
             self.effects.append(eff)
             self.pointer_reads.append(_reads_through_pointer(op, operands))
-            self.stack_pointer = self.stack_pointer or _makes_stack_pointer(op, eff)
+            self.stack_pointers.append(_makes_stack_pointer(op, eff))
+            self.pointer_writes.append(_writes_through_pointer(op, operands))
+        self.stack_pointer = any(self.stack_pointers)
         self._layout: tuple[list[int], list[int], list[int]] | None = None
         self._routines: _Routines | None = None
 
@@ -590,10 +652,11 @@ class _Code:
 
     def moves_return(self, name: str) -> bool:
         """Is ``name`` a routine of this text that may move its return
-        address (or what the stack holds under it), or return at a stack
-        height not known?"""
+        address (or what the stack holds under it), read what is above it,
+        or return at a stack height not known?"""
         t = self.target(name.strip())
-        return t is not None and (t in self.routines.irregular or self.routines.wild[t])
+        return t is not None and (t in self.routines.irregular or self.routines.wild[t] or
+                                  t in self.routines.peeks)
 
     def layout(self) -> tuple[list[int], list[int], list[int]]:
         """Address, size and segment of every line.  A line whose size is not

@@ -84,6 +84,46 @@ def test_no_tail_call_to_a_routine_that_looks_under_its_return_address():
     assert "call Q" in instrs(out)
 
 
+# THERE reads the zero flag: it is not where P's `ret' was taken to go.
+THERE = "THERE:\n\tld b,0\n\tjr nz,L1\n\tld b,1\nL1:\n\tjp 0\n"
+
+
+@pytest.mark.parametrize("src", [
+    # P writes THERE over its return address, through a pointer from SP.
+    ("\tcall P\n\tcp b\n\tjp 0\nP:\n\tld hl,0\n\tadd hl,sp\n\tld de,THERE\n"
+     "\tld (hl),e\n\tinc hl\n\tld (hl),d\n\tld a,0\n\tret\n" + THERE),
+    # S writes it over its caller's.
+    ("\tcall P\n\tcp b\n\tjp 0\nP:\n\tcall S\n\tld a,0\n\tret\nS:\n\tld hl,2\n\tadd hl,sp\n"
+     "\tld de,THERE\n\tld (hl),e\n\tinc hl\n\tld (hl),d\n\tret\n" + THERE),
+    # R2 writes it through a pointer R1 kept, which is where R2's is.
+    ("\tcall R1\n\tcall R2\n\tcp b\n\tjp 0\nR1:\n\tld (W),sp\n\tret\nR2:\n\tld hl,(W)\n"
+     "\tld de,THERE\n\tld (hl),e\n\tinc hl\n\tld (hl),d\n\tld a,0\n\tret\n" + THERE),
+])
+def test_a_return_address_changed_through_a_pointer_made_from_sp(src):
+    """P's `ret' was taken to go back to its call, where `cp b' writes
+    the flags, and `ld a,0' became `xor a'.  It goes to THERE."""
+    out = assert_equivalent(src)
+    assert "ld a,0" in instrs(out)
+
+
+def test_no_tail_call_to_a_routine_that_reads_above_its_return_address():
+    """RD reads the word its caller's caller pushed, through a pointer from
+    SP.  `call RD / ret' as `jp RD' leaves one return address fewer
+    between, and RD reads another word."""
+    src = ("\tld hl,7\n\tpush hl\n\tcall QD\n\tpop hl\n\tjp 0\nQD:\n\tcall RD\n\tret\n"
+           "RD:\n\tld hl,4\n\tadd hl,sp\n\tld a,(hl)\n\tret\n")
+    out = assert_equivalent(src)
+    assert "call RD" in instrs(out)
+
+
+def test_a_routine_that_writes_through_a_pointer_where_none_is_made_from_sp():
+    """Where the text makes no pointer from SP, a write through a pointer
+    does not reach a return address, and P's `ret' goes back to its call."""
+    src = "\tld hl,W\n\tcall P\n\tcp b\n\tjp 0\nP:\n\tld (hl),e\n\tld a,0\n\tret\n"
+    out = assert_equivalent(src)
+    assert "xor a" in instrs(out)
+
+
 def test_dead_store_read_spelled_otherwise_is_kept():
     """A load of the stored byte is a read however its address is written."""
     tail = "\tret\nP:\n\tld (BUF+13),a\n\tret\nBUF:\n\tds 16\n"

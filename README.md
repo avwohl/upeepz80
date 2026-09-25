@@ -119,7 +119,9 @@ back, from a `ret` to every call of the routine, and through a `push` to its
 everything: a call or jump to a label defined elsewhere, `call 5`, `jp 0`,
 `jp (hl)`, data, or the end of the text. So does a `ret` from a routine that
 another module may call (`public`, `NAME::`, or its address taken), or that
-takes its return address off the stack (`ex (sp),hl / ret`).
+takes its return address off the stack (`ex (sp),hl / ret`), or that may
+change it through a pointer made from SP (`ld hl,0 / add hl,sp / ld
+(hl),e`).
 
 Numbers are read under the text's radix. Where it sets a `.radix` other than
 ten, only numbers that mean the same under any radix are rewritten.
