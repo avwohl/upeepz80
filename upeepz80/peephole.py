@@ -244,6 +244,14 @@ class _Routines:
     calls with - not from a module this text calls, which hands none
     back, and reads nothing above its own return address through one it
     is handed.
+
+    Code that goes on where it cannot be followed may run any code, this
+    text's or another's, and so it peeks: ``jp (hl)``, ``jp (ix)``, ``jp
+    (iy)``, a ``ret`` to what it pushed (``push hl / ret``), ``reti``,
+    ``retn``, ``halt``, data, a directive or an instruction not
+    recognised, and a jump or call to an address of this text that is not
+    one of its labels as written (``jp ALIAS`` where ``ALIAS equ RTN``,
+    ``call rtn``, ``jp $+3``: see :meth:`_Code.unfollowed`).
     """
 
     def __init__(self, code: "_Code"):
@@ -329,10 +337,24 @@ class _Routines:
             unbalanced |= more
         self.height: list[int | None] = height
         self.irregular = irregular
+
+        # Code that goes on where it cannot be followed (see the docstring).
+        def lost(i: int) -> bool:
+            eff = effects[i]
+            if eff is None:
+                return False
+            if eff.flow in ("stop", "data"):
+                return True
+            if eff.flow == "return":
+                return height[i] is not None and height[i] != 0
+            return eff.flow in ("jump", "branch", "call") and eff.target is not None and \
+                code.unfollowed(eff.target)
+
         # Pointers made from SP: code that makes one peeks.  Where the text
         # makes one anywhere, code that reads through a pointer, which its
         # caller may have made, peeks too, and code that writes through one
-        # is wild.  Code that calls code that peeks, or is wild, is so too.
+        # is wild.  Code that goes where it cannot be followed peeks.  Code
+        # that calls code that peeks, or is wild, is so too.
         callees = {root: {code.target(effects[i].target) for i in reach[root]
                           if effects[i] is not None and effects[i].flow == "call"}
                    for root in roots}
@@ -349,8 +371,8 @@ class _Routines:
 
         self.peeks = closed_over_calls(
             {root for root in roots
-             if any(code.stack_pointers[i] or (code.stack_pointer and code.pointer_reads[i])
-                    for i in reach[root])})
+             if any(code.stack_pointers[i] or (code.stack_pointer and code.pointer_reads[i]) or
+                    lost(i) for i in reach[root])})
         writes: set[int] = set()
         if code.stack_pointer:
             writes = closed_over_calls(
@@ -470,6 +492,11 @@ class _Code:
             self.stack_pointers.append(_makes_stack_pointer(op, eff))
             self.pointer_writes.append(_writes_through_pointer(op, operands))
         self.stack_pointer = any(self.stack_pointers)
+        # The names the text defines, lowercase: its labels, and the names
+        # an equate sets to anything but a number (`ALIAS equ RTN').
+        numbers = {name.lower() for name in self.equ}
+        self.defined = {name.lower() for name, _ in self.label_lines} | \
+            {name.lower() for name in seen_equ} - numbers
         self._layout: tuple[list[int], list[int], list[int]] | None = None
         self._routines: _Routines | None = None
 
@@ -477,6 +504,19 @@ class _Code:
         if name is None:
             return None
         return self.labels.get(name)
+
+    def unfollowed(self, name: str) -> bool:
+        """Is ``name``, where a jump or call goes, an address in this text
+        that :meth:`target` does not find?  A label spelled otherwise
+        (``rtn`` for ``RTN``: M80 does not tell case), a name an equate
+        sets to anything but a number (``ALIAS equ RTN``), an expression
+        over one of those (``RTN+3``), and ``$`` are.  A number, and a name
+        that the text does not define or sets to a number (``BDOS equ 5``),
+        are outside it."""
+        if self.target(name.strip()) is not None:
+            return False
+        names = _names(name)
+        return "$" in names or bool(names & self.defined)
 
     @property
     def routines(self) -> _Routines:
@@ -660,10 +700,12 @@ class _Code:
     def moves_return(self, name: str) -> bool:
         """Is ``name`` a routine of this text that may move its return
         address (or what the stack holds under it), read what is above it,
-        or return at a stack height not known?"""
+        or return at a stack height not known?  Or an address of this text
+        that is not followed, which may be any of its code?"""
         t = self.target(name.strip())
-        return t is not None and (t in self.routines.irregular or self.routines.wild[t] or
-                                  t in self.routines.peeks)
+        if t is None:
+            return self.unfollowed(name)
+        return t in self.routines.irregular or self.routines.wild[t] or t in self.routines.peeks
 
     def layout(self) -> tuple[list[int], list[int], list[int]]:
         """Address, size and segment of every line.  A line whose size is not

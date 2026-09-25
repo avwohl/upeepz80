@@ -92,6 +92,23 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   `ld hl,n / ld r,l` and one threaded jump. 61 of the bytes are in 80un's
   two programs of several modules, whose procedures take their
   parameters on the stack and read them with `ld hl,2 / add hl,sp`.
+- **`call x / ret` became `jp x` where the code that reads above its
+  return address is reached in a way the optimizer does not follow.**
+  0.2.5 did the same. With `RTN:` as RD above, `call rtn / ret` became
+  `jp rtn`: the optimizer found no label `rtn`, but M80 does not tell
+  case. So did `call DSP / ret` where DSP goes on to RTN through `jp
+  (hl)`, `jp (ix)`, `push hl / ret`, or `jp ALIAS` with `ALIAS equ RTN`.
+  No tail call is now made to a routine that goes on where the optimizer
+  cannot follow, nor to one that calls such a routine. That is `jp
+  (hl)`, `jp (ix)`, `jp (iy)`, a `ret` to what the routine pushed,
+  `reti`, `retn`, `halt`, data, a directive or an instruction the
+  optimizer does not know, and a jump or call to an address of the text
+  that is not one of its labels as written (`jp ALIAS`, `call rtn`, `jp
+  $+3`). Nor is a tail call made to such an address itself. A number,
+  and a name the text does not define or sets to a number (`BDOS equ
+  5`), are taken to be outside the text. On the corpus this costs 14
+  bytes: five tail calls in each of the two builds of PIP.PLM, whose `DO
+  CASE` goes through `jp (hl)`.
 
 ### Added
 
@@ -105,7 +122,12 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   value read, and a return address changed, through a pointer made from
   SP, three ways each, a store between `push af` and `pop af`, and the
   tail calls above, three ways. Each runs the code before and after
-  optimization, and fails on 0.2.5.
+  optimization, and fails on 0.2.5. So do the tail calls to RTN through a
+  name in lower case, an equate, `jp (hl)`, `jp (ix)`, `jp (iy)` and `push
+  hl / ret`, and those to a routine that goes on to code that pops what its
+  caller pushed, or reads through its caller's pointer. Eleven more ways
+  for a routine to go where the optimizer cannot follow each keep the
+  call. `tests/z80sim.py` now jumps to a name an equate sets to a label.
 - `tests/peepfuzz.py`: half the programs now also call a routine that
   stores its parameter at its entry, between two neighbours in storage the
   program defines, and then read the byte or not, by its own name or from

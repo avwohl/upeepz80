@@ -143,6 +143,76 @@ def test_no_tail_call_to_a_routine_that_reads_through_its_callers_pointer(src):
     assert "call RB" in instrs(out)
 
 
+# RTN reads the word pushed before QQ was called, through a pointer it makes
+# from SP, as RD above does.
+RD_MAIN = "\tld de,5A5Ah\n\tpush de\n\tcall QQ\n\tpop de\n\tld hl,0\n\tjp 0\n"
+RD_RTN = "RTN:\n\tld ix,9080h\n\tld hl,4\n\tadd hl,sp\n\tld a,(hl)\n\tld hl,0\n\tret\n"
+
+
+@pytest.mark.parametrize("way", [
+    # The label spelled in lower case: M80 does not tell case.
+    "QQ:\n\tcall rtn\n\tret\n",
+    # A name an equate sets to it.
+    "QQ:\n\tcall ALIAS\n\tret\nALIAS\tequ RTN\n",
+    "QQ:\n\tcall DSP\n\tret\nDSP:\n\tjp ALIAS\nALIAS\tequ RTN\n",
+    # Its address in a register, and a jump to it.
+    "QQ:\n\tld hl,RTN\n\tcall DSP\n\tret\nDSP:\n\tjp (hl)\n",
+    "QQ:\n\tld ix,RTN\n\tcall DSP\n\tret\nDSP:\n\tjp (ix)\n",
+    "QQ:\n\tld iy,RTN\n\tcall DSP\n\tret\nDSP:\n\tjp (iy)\n",
+    "QQ:\n\tld hl,RTN\n\tcall DSP\n\tret\nDSP:\n\tpush hl\n\tret\n",
+    # ... from a routine DSP calls.
+    "QQ:\n\tld hl,RTN\n\tcall DSP\n\tret\nDSP:\n\tcall DSP2\n\tret\nDSP2:\n\tjp (hl)\n",
+])
+def test_no_tail_call_to_a_routine_reached_where_it_cannot_be_followed(way):
+    """QQ reaches RTN other than through a label as it is written, so
+    `call RTN' is not seen.  `call ... / ret' as `jp ...' leaves one return
+    address fewer between, and RTN reads another word."""
+    out = assert_equivalent(RD_MAIN + way + RD_RTN)
+    assert any(line.startswith("call ") for line in instrs(out)), out
+
+
+@pytest.mark.parametrize("src", [
+    # WW points HL where `call DSP' puts DSP's return address, and RTN,
+    # which DSP goes to through IX, reads it.
+    ("\tcall WW\n\tjp 0\nWW:\n\tld hl,0\n\tadd hl,sp\n\tdec hl\n\tdec hl\n\tdec hl\n\tdec hl\n"
+     "\tld ix,RTN\n\tcall DSP\n\tret\nDSP:\n\tjp (ix)\nRTN:\n\tld a,(hl)\n\tld ix,9080h\n"
+     "\tld hl,0\n\tret\n"),
+    # RTN takes its return address and what QQ pushed, and puts the first
+    # back: jumped to, DSP would take QQ's return address for the second.
+    ("\tld bc,1234h\n\tcall QQ\n\tld de,0\n\tjp 0\nQQ:\n\tpush bc\n\tld hl,RTN\n\tcall DSP\n"
+     "\tret\nDSP:\n\tjp (hl)\nRTN:\n\tpop hl\n\tpop de\n\tpush hl\n\tld hl,0\n\tret\n"),
+])
+def test_no_tail_call_through_jp_to_a_register(src):
+    out = assert_equivalent(src)
+    assert "call DSP" in instrs(out), out
+
+
+@pytest.mark.parametrize("body", [
+    "\tjp (hl)\n", "\tld a,1\n\thalt\n", "\treti\n", "\tjp RTN+3\n", "\tjp $+3\n",
+    "\tjr $+2\n", "\tjp nz,RTN+3\n", "\tld a,1\n\tdb 0\n", "\tld a,1\n\tif 1\n\tret\n\tendif\n",
+    "\tmvi a,1\n\tret\n", "\tcall rtn\n\tret\n",
+])
+def test_no_tail_call_to_a_routine_that_goes_where_it_cannot_be_followed(body):
+    """What DSP runs next is not known, and may read above its return
+    address."""
+    src = "\tcall DSP\n\tret\nDSP:\n" + body + "RTN:\n\tld a,2\n\tret\n"
+    assert "call DSP" in instrs(optimize(src))
+
+
+@pytest.mark.parametrize("src", [
+    # a routine of another module, and a number
+    "\textrn EXT\n\tcall EXT\n\tret\n",
+    "\tcall 5\n\tret\n",
+    # a name an equate sets to a number is one
+    "BDOS\tequ 5\n\tcall BDOS\n\tret\n",
+    "\tcall DSP\n\tret\nDSP:\n\tld c,2\n\tjp BDOS\nBDOS\tequ 5\n",
+])
+def test_a_tail_call_out_of_the_text_is_made(src):
+    """Code that another module holds, or at an address that is a number,
+    is taken not to read above its return address (see Known issues)."""
+    assert not any(line.startswith("call ") for line in instrs(optimize(src)))
+
+
 def test_a_routine_that_writes_through_a_pointer_where_none_is_made_from_sp():
     """Where the text makes no pointer from SP, a write through a pointer
     does not reach a return address, and P's `ret' goes back to its call."""
