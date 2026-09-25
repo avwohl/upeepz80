@@ -123,7 +123,8 @@ def _base_offset(expr: str, radix: int | None) -> tuple[str, int] | None:
     return m.group(1).lower(), -k if m.group(2) == "-" else k
 
 
-def _names(text: str) -> set[str]:
+@lru_cache(maxsize=1 << 16)
+def _names(text: str) -> frozenset[str]:
     """The names ``text`` uses, lowercase; what is in quotes aside."""
     kept = []
     quote = None
@@ -135,7 +136,7 @@ def _names(text: str) -> set[str]:
             quote = ch
         else:
             kept.append(ch)
-    return {n.lower() for n in _NAME.findall("".join(kept))}
+    return frozenset(n.lower() for n in _NAME.findall("".join(kept)))
 
 
 def _same_operand(a: str, b: str) -> bool:
@@ -169,6 +170,7 @@ def _makes_stack_pointer(op: str | None, eff: Effect | None) -> bool:
         eff.stack == 0 and op != "ex"
 
 
+@lru_cache(maxsize=1 << 16)
 def _reads_through_pointer(op: str | None, operands: str) -> bool:
     """Does the instruction read memory at an address that HL, BC, DE, IX
     or IY holds?  (SP's reads - pop, ret, ex (sp) - are the stack's.)"""
@@ -191,6 +193,7 @@ _WRITE_OPERAND = frozenset({"inc", "dec", "rlc", "rrc", "rl", "rr", "sla", "sra"
                             "sll", "sl1", "set", "res"})
 
 
+@lru_cache(maxsize=1 << 16)
 def _writes_through_pointer(op: str | None, operands: str) -> bool:
     """Does the instruction write memory at an address that HL, BC, DE, IX
     or IY holds?"""
@@ -203,6 +206,10 @@ def _writes_through_pointer(op: str | None, operands: str) -> bool:
     parts = split_operands(operands)
     target = (parts[0] if op == "ld" else parts[-1]) if parts else ""
     return classify(target).kind in ("mem_hl", "mem_bc", "mem_de", "mem_idx")
+
+
+# A stack height where nothing reaches (_Routines._heights).
+_UNSET = object()
 
 
 class _Routines:
@@ -341,45 +348,73 @@ class _Routines:
                 stack.extend(successors(i))
             reach[root] = reached
 
-        # Code that goes on where it cannot be followed (see the docstring).
-        def lost(i: int) -> bool:
-            eff = effects[i]
+        # The lines each question below is about, and those of each routine:
+        # the heights change from round to round of the loop below, and the
+        # lines do not.
+        #   Lines that go on where they cannot be followed (see the
+        #   docstring), whatever the height: data, a directive, `jp (hl)',
+        #   a jump or call to an address of this text not followed.
+        gone: set[int] = set()
+        #   Returns: at a height other than 0 they go where they cannot be
+        #   followed, or anywhere.
+        returns: set[int] = set()
+        #   Lines that take the return address (or what is under it) off
+        #   the stack at a height of 0 or less: a pop, or `ex (sp),rr'.
+        movers: set[int] = set()
+        calls: set[int] = set()
+        for i, eff in enumerate(effects):
             if eff is None:
-                return False
+                continue
             if eff.flow in ("stop", "data"):
-                return True
-            if eff.flow == "return":
-                return height[i] is not None and height[i] != 0
-            return eff.flow in ("jump", "branch", "call") and eff.target is not None and \
-                code.unfollowed(eff.target)
+                gone.add(i)
+            elif eff.flow == "return":
+                returns.add(i)
+            elif eff.flow in ("jump", "branch", "call") and eff.target is not None and \
+                    code.unfollowed(eff.target):
+                gone.add(i)
+            if eff.flow == "call":
+                calls.add(i)
+            if eff.flow == "next" and "sp" in eff.reads and \
+                    (eff.stack == -1 or (eff.stack == 0 and _split(code.lines[i])[1] == "ex")):
+                movers.add(i)
+        goes = {root for root in roots if not gone.isdisjoint(reach[root])}
+        root_returns = {root: reach[root] & returns for root in roots}
+        root_movers = {root: reach[root] & movers for root in roots}
 
         # Routines that move their return address, return at a height not
         # known or go where they cannot be followed, and the heights, which
         # are unknown after a call of one: each can make more of the other.
         unbalanced: set[int] = set()
         callees = set(self.calls)
+        height: list = [_UNSET] * (n + 1)
+        starts = [root for root in roots if root < n]
+        for root in starts:
+            height[root] = 0
         while True:
-            height = self._heights(code, roots, successors, unbalanced)
+            self._heights(code, successors, unbalanced, height, starts)
             wild = {root for root in roots
-                    if any(self._moves_return(code, i, height[i]) for i in reach[root])}
-            irregular = wild | {root for root in roots
-                                if any(height[i] is None and effects[i] is not None and
-                                       effects[i].flow == "return" for i in reach[root])}
-            irregular |= {root for root in roots if any(lost(i) for i in reach[root])}
+                    if any(type(height[i]) is int and height[i] <= 0 for i in root_movers[root])}
+            # A return at a height not known, or at one other than 0, which
+            # goes where it cannot be followed.
+            irregular = wild | goes | {root for root in roots
+                                       if any(height[i] != 0 for i in root_returns[root])}
             more = (irregular & callees) - unbalanced
             if not more:
                 break
             unbalanced |= more
+            # The height after a call of one of these is not known now; the
+            # rest stays as it is.
+            starts = [c - 1 for t in more for c in self.calls[t] if height[c - 1] is not _UNSET]
+        height = [None if h is _UNSET else h for h in height]
         self.height: list[int | None] = height
         self.irregular = irregular
 
         # Pointers made from SP: code that makes one peeks.  Where the text
         # makes one anywhere, code that reads through a pointer, which its
         # caller may have made, peeks too, and code that writes through one
-        # is wild.  Code that goes where it cannot be followed peeks.  Code
-        # that calls code that peeks, or is wild, is so too.
-        callees = {root: {code.target(effects[i].target) for i in reach[root]
-                          if effects[i] is not None and effects[i].flow == "call"}
+        # is wild.  Code that goes where it cannot be followed peeks: it is
+        # irregular.  Code that calls code that peeks, or is wild, is so too.
+        callees = {root: {code.target(effects[i].target) for i in reach[root] & calls}
                    for root in roots}
 
         def closed_over_calls(found: set[int]) -> set[int]:
@@ -397,14 +432,15 @@ class _Routines:
         # de,THERE / push de / push hl / ret'): a caller that returns after
         # the call is irregular itself, and one that leaves otherwise
         # (`call SWAP / jp EXT') peeks.
+        peeking = {i for i in range(n)
+                   if code.stack_pointers[i] or (code.stack_pointer and code.pointer_reads[i])}
         self.peeks = closed_over_calls(
-            {root for root in roots
-             if any(code.stack_pointers[i] or (code.stack_pointer and code.pointer_reads[i]) or
-                    lost(i) for i in reach[root])} | set(irregular))
+            {root for root in roots if not peeking.isdisjoint(reach[root])} | set(irregular))
         writes: set[int] = set()
         if code.stack_pointer:
+            writing = {i for i in range(n) if code.pointer_writes[i]}
             writes = closed_over_calls(
-                {root for root in roots if any(code.pointer_writes[i] for i in reach[root])})
+                {root for root in roots if not writing.isdisjoint(reach[root])})
         self.wild = [False] * (n + 1)
         for root in wild | writes:
             for i in reach[root]:
@@ -429,18 +465,19 @@ class _Routines:
         self.enters_pushed = any(goes_pushed(i) for i in range(n))
 
     @staticmethod
-    def _heights(code: "_Code", roots: list[int], successors: Callable[[int], list[int]],
-                 unbalanced: set[int]) -> list[int | None]:
-        """Stack heights: 0 where a routine (or anything else) is entered."""
+    def _heights(code: "_Code", successors: Callable[[int], list[int]], unbalanced: set[int],
+                 height: list, work: list[int]) -> None:
+        """Stack heights: 0 where a routine (or anything else) is entered,
+        None where they are not known (two ways in disagree, or after a call
+        of an ``unbalanced`` routine), _UNSET where nothing reaches.
+
+        ``height`` is brought up to date from the lines in ``work`` on: the
+        roots, or calls of routines found unbalanced since it was.  As more
+        are, a height can only become not known, so the rest stand."""
         effects = code.effects
         n = len(effects)
-        unset = object()
-        height: list = [unset] * (n + 1)
-        work = []
-        for root in roots:
-            if root < n:
-                height[root] = 0
-                work.append(root)
+        unset = _UNSET
+        work = list(work)
         while work:
             i = work.pop()
             h = height[i]
@@ -464,16 +501,6 @@ class _Routines:
                 else:
                     height[j] = None  # two ways in disagree
                 work.append(j)
-        return [None if h is unset else h for h in height]
-
-    @staticmethod
-    def _moves_return(code: "_Code", i: int, h: int | None) -> bool:
-        """Does line ``i``, at stack height ``h``, take the return address
-        (or what is under it) off the stack?"""
-        eff = code.effects[i]
-        if h is None or eff is None or eff.flow != "next" or "sp" not in eff.reads:
-            return False
-        return h <= 0 and (eff.stack == -1 or (eff.stack == 0 and _split(code.lines[i])[1] == "ex"))
 
     def pushed(self, i: int) -> bool:
         """May the stack hold more at line ``i`` than where its routine was
@@ -555,6 +582,7 @@ class _Code:
             {name.lower() for name in seen_equ} - numbers
         self._layout: tuple[list[int], list[int], list[int]] | None = None
         self._routines: _Routines | None = None
+        self._unfollowed: dict[str, bool] = {}
 
     def target(self, name: str | None) -> int | None:
         if name is None:
@@ -569,10 +597,15 @@ class _Code:
         over one of those (``RTN+3``), and ``$`` are.  A number, and a name
         that the text does not define or sets to a number (``BDOS equ 5``),
         are outside it."""
-        if self.target(name.strip()) is not None:
-            return False
-        names = _names(name)
-        return "$" in names or bool(names & self.defined)
+        known = self._unfollowed.get(name)
+        if known is None:
+            if self.target(name.strip()) is not None:
+                known = False
+            else:
+                names = _names(name)
+                known = "$" in names or bool(names & self.defined)
+            self._unfollowed[name] = known
+        return known
 
     @property
     def routines(self) -> _Routines:
