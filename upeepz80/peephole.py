@@ -321,6 +321,12 @@ class _Code:
         # Labels defined with `::', lowercase.
         self.exported: set[str] = set()
         self.radix = _radix(lines)
+        # What earlier questions to live() found, for the lines where they
+        # were outside every routine they had followed a call into: the sets
+        # of resources found dead from there, and those found live.
+        self._dead: dict[int, list[frozenset]] = {}
+        self._live: dict[int, list[frozenset]] = {}
+        self.steps = 0
         seen_equ: set[str] = set()
         for idx, line in enumerate(lines):
             name = _exported(line)
@@ -370,14 +376,45 @@ class _Code:
         need0 = frozenset(resources)
         if not need0:
             return False
+        work: list[tuple[int | None, frozenset, tuple[int, ...]]] = [(s, need0, ()) for s in starts]
+        seen: dict[tuple[int, tuple[int, ...]], list[frozenset]] = {}
+        # The lines outside any call followed since the last item was taken
+        # from ``work``, with what was asked of each: all of them are live
+        # if the question ends at a read (or at what reads everything).
+        chain: list[tuple[int, frozenset]] = []
+        budget = [_BUDGET]
+        try:
+            found = self._walk(work, seen, chain, budget)
+        finally:
+            self.steps += _BUDGET - budget[0]
+        if found is None:  # out of budget: no answer to remember
+            return True
+        if found:
+            for i, need in chain:
+                self._remember(self._live, i, need)
+        else:
+            # Every line this question reached is dead for what it asked.
+            for (i, frames), needs in seen.items():
+                if not frames:
+                    for need in needs:
+                        self._remember(self._dead, i, need)
+        return found
+
+    @staticmethod
+    def _remember(memo: dict[int, list[frozenset]], i: int, need: frozenset) -> None:
+        known = memo.setdefault(i, [])
+        if len(known) < 8:
+            known.append(need)
+
+    def _walk(self, work: list, seen: dict, chain: list, budget: list[int]) -> bool | None:
+        """The body of :meth:`live`: True if live, False if dead, None if it
+        ran out of ``budget``."""
         routines = self.routines
         height = routines.height
         n = len(self.effects)
-        work: list[tuple[int | None, frozenset, tuple[int, ...]]] = [(s, need0, ()) for s in starts]
-        seen: dict[tuple[int, tuple[int, ...]], list[frozenset]] = {}
-        budget = _BUDGET
         while work:
             i, need, frames = work.pop()
+            chain.clear()
             while True:
                 if i is None or i >= n:
                     return True
@@ -385,9 +422,15 @@ class _Code:
                 if eff is None:
                     i += 1
                     continue
-                budget -= 1
-                if budget < 0:
-                    return True
+                budget[0] -= 1
+                if budget[0] < 0:
+                    return None
+                if not frames:
+                    if any(d >= need for d in self._dead.get(i, ())):
+                        break
+                    if any(k <= need for k in self._live.get(i, ())):
+                        return True
+                    chain.append((i, need))
                 key = (i, frames)
                 prior = seen.setdefault(key, [])
                 if any(need <= p for p in prior):

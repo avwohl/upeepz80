@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 
 REGS8 = frozenset("abcdehl")
 FLAGS = frozenset({"fs", "fz", "fh", "fp", "fn", "fc"})
@@ -275,6 +276,7 @@ def _alu_src(op: Operand) -> tuple[frozenset[str], int] | None:
     return None
 
 
+@lru_cache(maxsize=1 << 16)
 def effect(opcode: str, operand_text: str, radix: int | None = 10) -> Effect:
     """What ``opcode operand_text`` reads, writes and does to control flow.
 

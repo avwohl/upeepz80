@@ -241,3 +241,22 @@ def test_dead_store_through_another_name_is_kept():
     src = ("\tcall P1\n\tld a,(BUF + 1)\n\tret\nP1:\n\tld (BUF+1),a\n\tret\n"
            "BUF:\tds 4\n")
     assert "(BUF+1),a" in optimize(src)
+
+
+def test_liveness_is_linear_on_long_straight_code():
+    """Every question on straight code with no flag write walked to its end:
+    3000 copies of `ld a,0 / ld (v),a' took 52 s.  A question now stops
+    where an earlier one of the same pass has answered for what it asks."""
+    from upeepz80.peephole import _Code
+
+    n = 400
+    lines = ["\tld a,0", "\tld (V),a"] * n + ["\tor a", "\tret"]
+    code = _Code(lines)
+    for i in range(1, 2 * n, 2):
+        assert not code.live([i], {"fs", "fz", "fh", "fp", "fn", "fc"})
+    assert code.steps < 10 * len(lines), code.steps
+    lines[-2] = "\tnop"
+    code = _Code(lines)
+    for i in range(1, 2 * n, 2):
+        assert code.live([i], {"fc"})
+    assert code.steps < 10 * len(lines), code.steps
