@@ -24,13 +24,13 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from upeepz80.z80 import data_size, parse_number, split_operands, strip_comment  # noqa: E402
+from upeepz80.z80 import parse_number, split_operands, strip_comment  # noqa: E402
 
 CODE_BASE = 0x1000  # pseudo address of line 0; return addresses are CODE_BASE + line
 DATA_BASE = 0xA000  # where the data the text defines (ds, db, dw) is laid out
 SENTINEL = 0x0FFE  # the return address the run starts with
 
-DATA_OPS = ("db", "dw", "ds", "defb", "defw", "defs")
+DATA_OPS = ("db", "dw", "ds", "defb", "defw", "defs", "defm")
 # Directives that emit nothing and are passed over when run.
 DIRECTIVES = ("public", "extrn", "extern", ".z80", "end", "org", "title", "name",
               "cseg", "dseg", "aseg")
@@ -63,6 +63,43 @@ def szp(v: int) -> int:
     if parity(v):
         f |= FP
     return f
+
+
+# How um80 lays out data, which the optimizer's own sizes (upeepz80.z80's
+# data_size) must not contradict: modelled here apart from them.
+
+def _string(item: str) -> str | None:
+    """The characters of ``item`` if it is one quoted string, as um80 reads
+    it: a doubled quote inside stands for one, and ``'a'+'b'`` is an
+    expression."""
+    if len(item) < 2 or item[0] not in "'\"" or item[-1] != item[0]:
+        return None
+    q = item[0]
+    if q in item[1:-1].replace(q * 2, ""):
+        return None
+    return item[1:-1].replace(q * 2, q)
+
+
+def _items(ops: list[str]) -> list[str]:
+    """The items of a data line as um80 takes them: an empty one at the end
+    (``db 1,``) is dropped."""
+    return ops[:-1] if ops and not ops[-1].strip() else ops
+
+
+def _data_size(op: str, ops: list[str]) -> int:
+    """Bytes um80 emits for a data line (of its items, as :func:`_items`
+    gives them)."""
+    if any(not item.strip() for item in ops):
+        raise SimError(f"an empty item in {op} {ops}")
+    if op in ("ds", "defs"):
+        size = parse_number(ops[0]) if ops else None
+        if size is None:
+            raise SimError(f"size of {op} {ops} not known")
+        return size
+    if op in ("dw", "defw"):
+        return 2 * len(ops)
+    return sum(len(_string(item.strip())) if _string(item.strip()) is not None else 1
+               for item in ops)
 
 
 class Machine:
@@ -140,9 +177,8 @@ class Machine:
                 continue
             op, ops = ins
             if op in DATA_OPS:
-                size = data_size(op, ops)
-                if size is None:
-                    raise SimError(f"size of {op} {ops} not known")
+                ops = _items(ops)
+                size = _data_size(op, ops)
                 for label in pending:
                     del self.labels[label]
                     self.symbols[label] = top
@@ -160,8 +196,8 @@ class Machine:
                     v = self.eval(it) & 0xFFFF
                     self.mem[addr], self.mem[addr + 1] = v & 0xFF, v >> 8
                     addr += 2
-                elif len(it) >= 2 and it[0] == it[-1] and it[0] in "'\"":
-                    for ch in it[1:-1].replace(it[0] * 2, it[0]):
+                elif _string(it) is not None:
+                    for ch in _string(it):
                         self.mem[addr] = ord(ch) & 0xFF
                         addr += 1
                 else:

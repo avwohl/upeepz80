@@ -8,7 +8,7 @@ import tempfile
 
 import pytest
 
-from upeepz80.z80 import ALL, FLAGS, UNKNOWN, effect, strip_comment, split_operands
+from upeepz80.z80 import ALL, FLAGS, UNKNOWN, data_size, effect, strip_comment, split_operands
 
 R8 = ["a", "b", "c", "d", "e", "h", "l"]
 ALU = ["add a,", "adc a,", "sub ", "sbc a,", "and ", "xor ", "or ", "cp "]
@@ -127,4 +127,55 @@ def test_sizes_agree_with_the_assembler():
     for n, f in enumerate(body, start=4):
         if sizes.get(n) != model(f).size:
             wrong.append((f, sizes.get(n), model(f).size))
+    assert not wrong
+
+
+# Data lines: the sizes the model gives, and those it does not know.  An
+# empty item is one um80 drops at the end of a line and emits a byte or a
+# word for elsewhere; another assembler need not do either.
+DATA_KNOWN = ["db 1", "db 1,2", "db 'ab','c'", "db 'it''s'", "db \"it's\"", "db 'a,b'",
+              "db ''", "db ''''", "db 'a'+'b'", "db 'a' + 1", "db ('ab')", "db +'ab'",
+              "defm 'ab','cd'", "defb 1,2", "db 7,'x',8", "dw 1", "dw 1,2", "dw 'a'",
+              "defw 1,2", "ds 3", "ds 2,", "db 0 ; ,"]
+DATA_UNKNOWN = ["db 1,", "db 1, ", "db 1 ,", "db 1,;c", "db 1,2,", "db 'ab',", "db 'a',,",
+                "defb 1,", "defm 'a',", "db 1,,2", "db ,", "dw 1,", "dw ,1", "defw 1,",
+                "db 'a' 'b'", "db 'a''"]
+
+
+def data_model(text: str) -> int | None:
+    op, _, operands = strip_comment(text).partition(" ")
+    return data_size(op, split_operands(operands))
+
+
+def test_the_size_of_a_data_line():
+    assert [data_model(t) for t in DATA_KNOWN] == [1, 2, 3, 4, 4, 3, 0, 1, 1, 1, 1, 1, 4, 2, 3,
+                                                   2, 4, 2, 4, 3, 2, 1]
+    assert [t for t in DATA_UNKNOWN if data_model(t) is not None] == []
+
+
+@pytest.mark.skipif(_um80() is None, reason="um80 is not installed")
+def test_data_sizes_agree_with_the_assembler():
+    """Dead-store elimination takes a byte's offset from the sizes of the
+    data before it, so a size, where the model gives one, is the
+    assembler's: every data line is followed by a label, which the linker's
+    symbol file gives the address of."""
+    lines = [t for t in DATA_KNOWN + DATA_UNKNOWN if t not in ("db 'a' 'b'", "db 'a''")]
+    src = "\t.z80\n\tdseg\n" + "".join(f"L{n}::\t{t}\n" for n, t in enumerate(lines))
+    src += f"L{len(lines)}::\n\tend\n"
+    with tempfile.TemporaryDirectory() as d:
+        mac, rel = os.path.join(d, "D.MAC"), os.path.join(d, "D.REL")
+        with open(mac, "w") as fh:
+            fh.write(src)
+        r = subprocess.run(["um80", mac, "-o", rel], capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+        r = subprocess.run(["ul80", "-s", "-o", os.path.join(d, "D.COM"), rel],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+        sym = open(os.path.join(d, "D.SYM")).read()
+    at = {name.lower(): int(value, 16) for value, name in re.findall(r"([0-9A-F]{4})\s+(L\d+)", sym)}
+    wrong = []
+    for n, t in enumerate(lines):
+        size = data_model(t)
+        if size is not None and at[f"l{n + 1}"] - at[f"l{n}"] != size:
+            wrong.append((t, at[f"l{n + 1}"] - at[f"l{n}"], size))
     assert not wrong

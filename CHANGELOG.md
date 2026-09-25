@@ -45,6 +45,23 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   removed with uplm80 0.3.7. The 77 outputs that assemble grow by 45
   bytes, from 213,017 to 213,062. Without uplm80's `EQU`, it keeps 19 of
   30, and the code is the same as with it.
+- **Dead-store elimination removed a store after a line of data that ends
+  with a comma,** though a load reads it. It takes a byte's offset from the
+  sizes of the data before it, and counted an empty item: `dw 4141h,` was
+  4 bytes and `db 'A',` 2. um80 drops an empty item at the end of a line,
+  and emits 2 and 1. So after `PA: dw 4141h, / PB: ds 1`, `ld a,(PA+2)`
+  was taken to read PA, and the store to PB at a procedure's entry went.
+  0.2.5 did the same, and the same with `db 1,`, `db 1,2,`, `db 'ab',`,
+  `defb`, `defw` and `defm`. um80 emits a byte or a word of 0 for an empty
+  item before the end (`db 1,,2`, `db ,`), and another assembler need not
+  do either, so a line with an empty item anywhere now has a size that is
+  not known, and no store is removed from its run or after it. An item was
+  also taken for a string wherever it began and ended with the same quote:
+  `db 'A'+'B'` was the five characters of `A'+'B`, where it is one byte.
+  Now it is a string only if a quote inside it is doubled, one byte if it
+  is an expression over strings (joined by an operator, or in
+  parentheses), and of a size not known otherwise (`db 'a' 'b'`). uplm80
+  writes none of these, and nothing changes on the corpus.
 - **A value on the stack was taken to be read only by its `pop`, and by
   what reads SP.** Code can also read it through a pointer made from SP
   before the push. After `ld hl,0 / add hl,sp / dec hl / ex de,hl`, DE

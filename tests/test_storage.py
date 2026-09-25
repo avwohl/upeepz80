@@ -209,6 +209,40 @@ def test_a_call_followed_by_code_gives_no_address_in_the_data():
     assert "(SLOT),a" in optimize(src)
 
 
+# ---- the size of a line of data ---------------------------------------------------
+
+def ends_with_comma(data: str, read: str) -> str:
+    """P stores A in PB at its entry; PB follows PA, whose line of data is
+    ``data``; the load reads the byte at ``read``."""
+    return ("\tld a,42h\n\tcall P\n\tld a,(" + read + ")\n\tjp 0\nP:\n\tld (PB),a\n\tret\n"
+            "\tdseg\nPA:\t" + data + "\nPB:\tds 1\n")
+
+
+@pytest.mark.parametrize("data,read", [
+    ("db 'A',", "PA+1"), ("db 41h,", "PA+1"), ("db 41h, ", "PA+1"), ("db 41h ,", "PA+1"),
+    ("db 41h,;x", "PA+1"), ("defb 41h,", "PA+1"), ("defm 'A',", "PA+1"),
+    ("db 'AB',", "PA+2"), ("db 41h,42h,", "PA+2"), ("dw 4141h,", "PA+2"), ("defw 4141h,", "PA+2"),
+])
+def test_a_store_after_a_line_of_data_that_ends_with_a_comma_is_kept(data, read):
+    """um80 drops an empty item at the end of a line: `db 'A',' is one
+    byte, and PB is PA+1, which the load reads.  PA was taken for two
+    bytes, the load for one of them, and the store to PB went."""
+    out = assert_equivalent(ends_with_comma(data, read))
+    assert "ld (PB),a" in instrs(out)
+
+
+def test_a_store_after_an_expression_over_strings_is_kept():
+    """`'A'+'B'' is one byte, 83H, not the string `A'+'B'."""
+    out = assert_equivalent(ends_with_comma("db 'A'+'B'", "PA+1"))
+    assert "ld (PB),a" in instrs(out)
+
+
+def test_the_interpreter_drops_an_empty_item_at_the_end_of_a_line_of_data():
+    m = Machine("\tret\n\tdseg\nA:\tdb 'xy',\nB:\tdw 1,\nC:\tdb 'a'+1\nD:\tds 1\n")
+    assert (m.symbols["b"], m.symbols["c"], m.symbols["d"]) == \
+        (DATA_BASE + 2, DATA_BASE + 4, DATA_BASE + 5)
+
+
 # ---- data run as code ------------------------------------------------------------
 
 def patched(way: str, before: str) -> str:

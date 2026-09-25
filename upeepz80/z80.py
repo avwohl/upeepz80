@@ -574,17 +574,59 @@ def _alu(op: str, ops: list[str]) -> Effect:
     return _nx(reads, writes, size)
 
 
+def string_item(item: str) -> str | None:
+    """The characters of ``item`` if it is one quoted string (``'it''s'``,
+    where a doubled quote stands for one), else None: ``'a'+'b'`` is an
+    expression, the byte 0C3H."""
+    it = item.strip()
+    if len(it) < 2 or it[0] not in "'\"" or it[-1] != it[0]:
+        return None
+    q = it[0]
+    body = it[1:-1]
+    if q in body.replace(q * 2, ""):
+        return None
+    return body.replace(q * 2, q)
+
+
+def _quoted_expression(item: str) -> bool:
+    """Is ``item``, which holds a quote but is not one string, an expression
+    over strings - its quotes pair up, and an operator or a parenthesis
+    outside them joins its terms (``'a'+80h``, ``('ab')``)?  Not ``'a'
+    'b'``, nor ``'a''``, which assemblers read differently or not at all."""
+    outside = []
+    quote = None
+    for ch in item:
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "'\"":
+            quote = ch
+        else:
+            outside.append(ch)
+    return quote is None and any(ch in "+-*/()" for ch in outside)
+
+
 def data_size(op: str, ops: list[str], radix: int | None = 10) -> int | None:
-    """Bytes emitted by a data directive, or None if that is not known here."""
+    """Bytes emitted by a data directive, or None if that is not known here.
+
+    An empty item (``db 1,``, ``dw 1,,2``, ``db ,``) makes the size unknown.
+    um80 drops one at the end and emits a byte or a word of 0 for one
+    anywhere else; another assembler need not do either.  So does an item
+    with quotes that is neither one string nor an expression over strings
+    (``db 'a' 'b'``)."""
+    if op not in ("ds", "defs") and any(not item.strip() for item in ops):
+        return None
     if op in ("db", "defb", "defm", "byte", "dc"):
         total = 0
         for item in ops:
             it = item.strip()
-            if len(it) >= 2 and it[0] == it[-1] and it[0] in "'\"":
-                body = it[1:-1].replace(it[0] * 2, it[0])
+            body = string_item(it)
+            if body is not None:
                 if op == "dc":
                     return None
                 total += len(body)
+            elif ("'" in it or '"' in it) and not _quoted_expression(it):
+                return None
             else:
                 total += 1
         return total
