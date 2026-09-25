@@ -122,7 +122,8 @@ everything: a call or jump to a label defined elsewhere, `call 5`, `jp 0`,
 another module may call (`public`, `NAME::`, or its address taken), or that
 takes its return address off the stack (`ex (sp),hl / ret`), or that may
 change it through a pointer made from SP (`ld hl,0 / add hl,sp / ld
-(hl),e`).
+(hl),e`), or that calls a routine that goes on where the optimizer cannot
+follow (`jp (hl)`, `push hl / ret`).
 
 Numbers are read under the text's radix. Where it sets a `.radix` other than
 ten, only numbers that mean the same under any radix are rewritten.

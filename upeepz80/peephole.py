@@ -246,12 +246,14 @@ class _Routines:
     is handed.
 
     Code that goes on where it cannot be followed may run any code, this
-    text's or another's, and so it peeks: ``jp (hl)``, ``jp (ix)``, ``jp
-    (iy)``, a ``ret`` to what it pushed (``push hl / ret``), ``reti``,
-    ``retn``, ``halt``, data, a directive or an instruction not
-    recognised, and a jump or call to an address of this text that is not
-    one of its labels as written (``jp ALIAS`` where ``ALIAS equ RTN``,
-    ``call rtn``, ``jp $+3``: see :meth:`_Code.unfollowed`).
+    text's or another's: ``jp (hl)``, ``jp (ix)``, ``jp (iy)``, a ``ret``
+    to what it pushed (``push hl / ret``), ``reti``, ``retn``, ``halt``,
+    data, a directive or an instruction not recognised, and a jump or call
+    to an address of this text that is not one of its labels as written
+    (``jp ALIAS`` where ``ALIAS equ RTN``, ``call rtn``, ``jp $+3``: see
+    :meth:`_Code.unfollowed`).  That code may take its caller's return
+    address off the stack, or change it through a pointer, so the routine
+    is irregular; and it may read above its return address, so it peeks.
     """
 
     def __init__(self, code: "_Code"):
@@ -319,25 +321,6 @@ class _Routines:
                 stack.extend(successors(i))
             reach[root] = reached
 
-        # Routines that move their return address or return at a height not
-        # known, and the heights, which are unknown after a call of one:
-        # each can make more of the other.
-        unbalanced: set[int] = set()
-        callees = set(self.calls)
-        while True:
-            height = self._heights(code, roots, successors, unbalanced)
-            wild = {root for root in roots
-                    if any(self._moves_return(code, i, height[i]) for i in reach[root])}
-            irregular = wild | {root for root in roots
-                                if any(height[i] is None and effects[i] is not None and
-                                       effects[i].flow == "return" for i in reach[root])}
-            more = (irregular & callees) - unbalanced
-            if not more:
-                break
-            unbalanced |= more
-        self.height: list[int | None] = height
-        self.irregular = irregular
-
         # Code that goes on where it cannot be followed (see the docstring).
         def lost(i: int) -> bool:
             eff = effects[i]
@@ -349,6 +332,26 @@ class _Routines:
                 return height[i] is not None and height[i] != 0
             return eff.flow in ("jump", "branch", "call") and eff.target is not None and \
                 code.unfollowed(eff.target)
+
+        # Routines that move their return address, return at a height not
+        # known or go where they cannot be followed, and the heights, which
+        # are unknown after a call of one: each can make more of the other.
+        unbalanced: set[int] = set()
+        callees = set(self.calls)
+        while True:
+            height = self._heights(code, roots, successors, unbalanced)
+            wild = {root for root in roots
+                    if any(self._moves_return(code, i, height[i]) for i in reach[root])}
+            irregular = wild | {root for root in roots
+                                if any(height[i] is None and effects[i] is not None and
+                                       effects[i].flow == "return" for i in reach[root])}
+            irregular |= {root for root in roots if any(lost(i) for i in reach[root])}
+            more = (irregular & callees) - unbalanced
+            if not more:
+                break
+            unbalanced |= more
+        self.height: list[int | None] = height
+        self.irregular = irregular
 
         # Pointers made from SP: code that makes one peeks.  Where the text
         # makes one anywhere, code that reads through a pointer, which its

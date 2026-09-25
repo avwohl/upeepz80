@@ -117,6 +117,27 @@ def test_a_return_address_changed_through_a_pointer_made_from_sp(src):
     assert "ld a,0" in instrs(out)
 
 
+@pytest.mark.parametrize("src", [
+    # RTN, which DSP goes on to through `jp (hl)', writes THERE over QQ's
+    # return address through a pointer from SP.
+    ("\tcall QQ\n\tcp b\n\tjp 0\nQQ:\n\tld hl,RTN\n\tcall DSP\n\tld a,0\n\tret\nDSP:\n\tjp (hl)\n"
+     "RTN:\n\tld hl,2\n\tadd hl,sp\n\tld de,THERE\n\tld (hl),e\n\tinc hl\n\tld (hl),d\n\tret\n" + THERE),
+    # RTN takes QQ's return address off the stack and puts THERE instead.
+    ("\tcall QQ\n\tcp b\n\tjp 0\nQQ:\n\tld hl,RTN\n\tcall DSP\n\tld a,0\n\tret\nDSP:\n\tjp (hl)\n"
+     "RTN:\n\tpop de\n\tpop bc\n\tld hl,THERE\n\tpush hl\n\tpush de\n\tld bc,0\n\tld de,0\n\tret\n"
+     + THERE),
+    ("\tcall QQ\n\tcp b\n\tjp 0\nQQ:\n\tld hl,RTN\n\tcall DSP\n\tld a,0\n\tret\nDSP:\n\tpush hl\n"
+     "\tret\nRTN:\n\tpop de\n\tpop bc\n\tld hl,THERE\n\tpush hl\n\tpush de\n\tld bc,0\n\tld de,0\n"
+     "\tret\n" + THERE),
+])
+def test_a_return_address_changed_by_code_reached_where_it_cannot_be_followed(src):
+    """QQ's `ret' was taken to go back to its call, where `cp b' writes the
+    flags, and `ld a,0' became `xor a'.  DSP goes on to RTN, which QQ's
+    `ret' sends to THERE."""
+    out = assert_equivalent(src)
+    assert "ld a,0" in instrs(out)
+
+
 def test_no_tail_call_to_a_routine_that_reads_above_its_return_address():
     """RD reads the word its caller's caller pushed, through a pointer from
     SP.  `call RD / ret' as `jp RD' leaves one return address fewer

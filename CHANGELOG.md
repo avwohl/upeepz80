@@ -118,6 +118,22 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   something: where the stack height at the `call` is other than 0, or not
   known, as after `ld sp,hl`. On the corpus this costs one byte, in
   LOAD.PLM.
+- **A routine that goes on to code that changes its caller's return
+  address was taken to come back to its call, where the optimizer does
+  not follow the way.** 0.2.5 did the same. In `QQ: ld hl,RTN / call DSP
+  / ld a,0 / ret` with `DSP: jp (hl)`, RTN takes QQ's return address off
+  the stack and puts THERE in its place (`pop de / pop bc / ld hl,THERE /
+  push hl / push de / ret`). QQ's `ret` was followed to the line after
+  `call QQ`, where `cp b` writes the flags. So `ld a,0` became `xor a`,
+  and THERE read the zero flag that `xor a` sets. It was the same with
+  `DSP: push hl / ret`, and where RTN writes THERE over QQ's return
+  address through a pointer made from SP. A routine that goes on where
+  the optimizer cannot follow, as listed above, is now taken to come back
+  with the stack as it pleases, as one that takes its return address off
+  the stack is. The stack height after a call of it is not known, and a
+  `ret` after that goes anywhere. On the corpus this costs 24 bytes, all
+  in the two builds of PIP.PLM. Each loses 5 tail calls, 3 `cp 0` → `or
+  a`, 3 `ld a,0` → `xor a` and a `djnz`.
 
 ### Added
 
@@ -133,11 +149,11 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   tail calls above, three ways. Each runs the code before and after
   optimization, and fails on 0.2.5. So do the tail calls to RTN through a
   name in lower case, an equate, `jp (hl)`, `jp (ix)`, `jp (iy)` and `push
-  hl / ret`, those to a routine that goes on to code that pops what its
-  caller pushed, or reads through its caller's pointer, and the tail call
-  to SHOWP. Eleven more ways for a routine to go where the optimizer
-  cannot follow each keep the call. `tests/z80sim.py` now jumps to a name
-  an equate sets to a label.
+  hl / ret`; those to a routine that goes on to code that pops what its
+  caller pushed, or reads through its caller's pointer; the tail call to
+  SHOWP; and QQ's `ld a,0` above, three ways. Eleven more ways for a
+  routine to go where the optimizer cannot follow each keep the call.
+  `tests/z80sim.py` now jumps to a name an equate sets to a label.
 - `tests/peepfuzz.py`: half the programs now also call a routine that
   stores its parameter at its entry, between two neighbours in storage the
   program defines, and then read the byte or not, by its own name or from
