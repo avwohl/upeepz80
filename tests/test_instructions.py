@@ -9,12 +9,43 @@ from tests._equiv import assert_equivalent, instrs
 
 
 def test_ld_hl_const_byte_is_the_low_byte():
-    """`ld hl,299 / ld a,l' is not `ld a,299' - which does not assemble, and
-    here L was still needed as well (release difftest seed 1063)."""
+    """`ld hl,299 / ld a,l' is `ld a,02Bh', the low byte.  `ld a,299' is out
+    of range: um80 takes the low byte without a word, other assemblers
+    need not.  And here L was still needed as well (release difftest seed
+    1063)."""
     src = "\tld\thl,299\n\tld\ta,l\n\tld\tl,a\n\tld\th,0\n\tld\t(W),hl\n\tld\thl,5\n\tjp\t0\n"
     assert_equivalent(src)
     out = assert_equivalent("\tld hl,299\n\tld a,l\n\tld hl,0\n\tjp 0\n")
-    assert instrs(out)[0] == "ld a,43"
+    assert instrs(out)[0] == "ld a,02Bh"
+    out = assert_equivalent("\tld hl,-1\n\tld a,l\n\tld hl,0\n\tjp 0\n")
+    assert instrs(out)[0] == "ld a,0FFh"
+    # 0 to 255 stays as it is written.
+    out = assert_equivalent("\tld hl,0ah\n\tld a,l\n\tld hl,0\n\tjp 0\n")
+    assert instrs(out)[0] == "ld a,0ah"
+
+
+def test_a_number_under_another_radix():
+    """Under `.radix 16', 300 is 300H.  `ld hl,300 / ld a,l' became `ld
+    a,44', which that radix reads as 44H; the low byte of 300H is 0."""
+    out = optimize("\t.radix 16\n\tld hl,300\n\tld a,l\n\tld hl,0\n\tjp 0\n")
+    assert "ld a,44" not in instrs(out)
+    assert instrs(out)[1] == "ld hl,300"
+    # With a suffix, a number means the same under any radix; what is written
+    # back has one too.
+    out = optimize("\t.radix 16\n\tld hl,300h\n\tld a,l\n\tld hl,0\n\tjp 0\n")
+    assert instrs(out)[1] == "ld a,000h"
+    out = optimize("\t.radix 16\nK\tequ 12CH\n\tld hl,K\n\tld a,l\n\tld hl,0\n\tjp 0\n")
+    assert instrs(out)[2] == "ld a,02Ch"
+    # 64 is 100 under radix 16: no power of two.
+    kill = "\n\tld a,1\n\tld bc,0\n\tld de,0\n\tcp b\n\tret\n"
+    out = optimize("\t.radix 16\n\tld de,64\n\tcall ??mul16" + kill)
+    assert "call ??mul16" in instrs(out)
+    # `ds 10' is 16 bytes, and `ds 70' 112: a jr across it may not reach.
+    out = optimize("\t.radix 16\n\tjp L1\n\tds 70\n\tds 10\nL1:\n\tret\n")
+    assert instrs(out)[1] == "jp L1"
+    # `.radix 10' changes nothing.
+    out = optimize("\t.radix 10\n\tld hl,300\n\tld a,l\n\tld hl,0\n\tjp 0\n")
+    assert instrs(out)[1] == "ld a,02Ch"
 
 
 def test_ld_hl_of_an_address_is_not_a_byte():
@@ -24,7 +55,7 @@ def test_ld_hl_of_an_address_is_not_a_byte():
     out = optimize("\tld hl,W\n\tld a,l\n\tld hl,0\n\tjp 0\n")
     assert "ld a,W" not in instrs(out)
     out = optimize("K\tequ\t300\n\tld hl,K\n\tld e,l\n\tld hl,0\n\tjp 0\n")
-    assert instrs(out)[1] == "ld e,44"
+    assert instrs(out)[1] == "ld e,02Ch"
 
 
 @pytest.mark.parametrize("op", ["inc", "dec"])

@@ -275,12 +275,15 @@ def _alu_src(op: Operand) -> tuple[frozenset[str], int] | None:
     return None
 
 
-def effect(opcode: str, operand_text: str) -> Effect:
-    """What ``opcode operand_text`` reads, writes and does to control flow."""
+def effect(opcode: str, operand_text: str, radix: int | None = 10) -> Effect:
+    """What ``opcode operand_text`` reads, writes and does to control flow.
+
+    ``radix`` is the text's default radix, as for :func:`parse_number`; only
+    the size of ``ds`` depends on it."""
     op = opcode.lower()
     ops = split_operands(operand_text)
     try:
-        return _effect(op, ops)
+        return _effect(op, ops, radix)
     except (KeyError, IndexError, ValueError):
         return UNKNOWN
 
@@ -289,12 +292,12 @@ def _nx(reads, writes, size, **kw) -> Effect:
     return Effect(frozenset(reads), frozenset(writes), "next", None, size, **kw)
 
 
-def _effect(op: str, ops: list[str]) -> Effect:  # noqa: C901 - one table
+def _effect(op: str, ops: list[str], radix: int | None = 10) -> Effect:  # noqa: C901 - one table
     n = len(ops)
     if op in TRANSPARENT:
         return Effect(frozenset(), frozenset(), "next", None, 0)
     if op in DATA:
-        return Effect(ALL, frozenset(), "data", None, data_size(op, ops))
+        return Effect(ALL, frozenset(), "data", None, data_size(op, ops, radix))
     if op in BARRIERS:
         return UNKNOWN
 
@@ -569,7 +572,7 @@ def _alu(op: str, ops: list[str]) -> Effect:
     return _nx(reads, writes, size)
 
 
-def data_size(op: str, ops: list[str]) -> int | None:
+def data_size(op: str, ops: list[str], radix: int | None = 10) -> int | None:
     """Bytes emitted by a data directive, or None if that is not known here."""
     if op in ("db", "defb", "defm", "byte", "dc"):
         total = 0
@@ -588,14 +591,20 @@ def data_size(op: str, ops: list[str]) -> int | None:
     if op in ("ds", "defs"):
         if not ops:
             return None
-        v = parse_number(ops[0])
+        v = parse_number(ops[0], radix)
         return v if v is not None and v >= 0 else None
     return None
 
 
-def parse_number(text: str) -> int | None:
+def parse_number(text: str, radix: int | None = 10) -> int | None:
     """The value of a numeric literal (decimal, ``0FFH``, ``0x10``, ``101B``,
-    ``17O``/``17Q``, optionally negated), or None."""
+    ``17O``/``17Q``, optionally negated), or None.
+
+    ``radix`` is the default radix of the text.  None stands for one that is
+    not known, or not ten (after ``.radix 16``, ``300`` is 300H and ``101B``
+    and ``12D`` are hexadecimal too): then only a number whose value is the
+    same under every radix has one - a single digit, or one with the suffix
+    H, O or Q."""
     s = text.strip().upper().replace(" ", "")
     if not s:
         return None
@@ -604,6 +613,8 @@ def parse_number(text: str) -> int | None:
         neg = s[0] == "-"
         s = s[1:]
     if not s or not s[0].isdigit():
+        return None
+    if radix != 10 and not (len(s) == 1 or s.endswith(("H", "O", "Q"))):
         return None
     try:
         if s.startswith("0X"):
@@ -621,3 +632,8 @@ def parse_number(text: str) -> int | None:
     except ValueError:
         return None
     return -v if neg else v
+
+
+def hex_byte(v: int) -> str:
+    """``v``'s low byte as a number that reads the same under any radix."""
+    return f"0{v & 0xFF:02X}h"

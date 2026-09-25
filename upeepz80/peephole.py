@@ -38,6 +38,7 @@ from .z80 import (
     Effect,
     classify,
     effect,
+    hex_byte,
     parse_number,
     split_operands,
     strip_comment,
@@ -89,6 +90,17 @@ def _exported(line: str) -> str | None:
     """The label ``line`` defines with ``::``, which exports it, or None."""
     m = _EXPORTED.match(line)
     return m.group(1) if m else None
+
+
+def _radix(lines: list[str]) -> int | None:
+    """The default radix of numbers in ``lines``: ten, or None if a
+    ``.radix`` directive sets any other anywhere in them."""
+    for line in lines:
+        if "radix" in line.lower():
+            _, op, operands = _split(line)
+            if op in (".radix", "radix") and operands.strip() != "10":
+                return None
+    return 10
 
 
 def _same_operand(a: str, b: str) -> bool:
@@ -293,6 +305,7 @@ class _Code:
         self.equ: dict[str, int] = {}
         # Labels defined with `::', lowercase.
         self.exported: set[str] = set()
+        self.radix = _radix(lines)
         seen_equ: set[str] = set()
         for idx, line in enumerate(lines):
             name = _exported(line)
@@ -300,7 +313,7 @@ class _Code:
                 self.exported.add(name.lower())
             label, op, operands = _split(line)
             if op in _EQUATES and label and (op != "set" or "," not in operands):
-                v = parse_number(operands)
+                v = parse_number(operands, self.radix)
                 if op == "equ" and v is not None and label not in seen_equ:
                     self.equ[label] = v
                 else:
@@ -312,7 +325,7 @@ class _Code:
                 # A label defined twice is nowhere in particular.
                 self.labels[label] = None if label in self.labels else idx
                 self.label_lines.append((label, idx))
-            self.effects.append(None if op is None else effect(op, operands))
+            self.effects.append(None if op is None else effect(op, operands, self.radix))
         self._layout: tuple[list[int], list[int], list[int]] | None = None
         self._routines: _Routines | None = None
 
@@ -1285,8 +1298,9 @@ class PeepholeOptimizer:
 
     def _const_value(self, code: _Code, text: str) -> int | None:
         """The value of a numeric literal, or of a symbol this text sets
-        with ``equ`` to one."""
-        v = parse_number(text)
+        with ``equ`` to one.  Under a ``.radix`` other than ten, only a
+        number that means the same under any radix has a value."""
+        v = parse_number(text, code.radix)
         if v is None:
             v = code.equ.get(text.strip())
         return v
@@ -1383,10 +1397,13 @@ class PeepholeOptimizer:
             val = self._const_value(code, const_text)
             # ld hl,const; ld r,l -> ld r,const, where both H and L are dead:
             # the whole ld hl,const goes.  The byte is L's, the constant's low
-            # byte (`ld a,299' does not assemble), and it is taken only from
-            # a constant whose value the text gives: a one-byte field holding
-            # part of a relocatable or external address is something some
-            # assemblers and linkers support and others do not.
+            # byte: `ld a,299' is out of range, which um80 lets through as
+            # the low byte and other assemblers need not.  It is written in
+            # hexadecimal with a suffix, which reads the same under any
+            # `.radix'.  And it is taken only from a constant whose value the
+            # text gives: a one-byte field holding part of a relocatable or
+            # external address is something some assemblers and linkers
+            # support and others do not.
             w = self._window(lines, i, 2)
             if w is not None and val is not None:
                 _, ins, skipped, j = w
@@ -1394,7 +1411,7 @@ class PeepholeOptimizer:
                 if op1 == "ld" and arg1.lower().endswith(",l"):
                     dest = arg1[:-2].strip().lower()
                     if dest in ("a", "b", "c", "d", "e") and dead(j, {"h", "l"}):
-                        byte = const_text.strip() if 0 <= val <= 255 else str(val & 0xFF)
+                        byte = const_text.strip() if 0 <= val <= 255 else hex_byte(val)
                         return skipped + [f"\tld {dest},{byte}"], j, "ld_via_hl"
             # ld hl,0; ld a,l; ld (addr),a -> xor a; ld (addr),a; ld hl,0, where
             # the flags xor a sets are dead, and the store does not address
