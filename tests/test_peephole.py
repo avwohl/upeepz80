@@ -377,6 +377,15 @@ class TestPreservation:
         assert "dw 1234h" in result
         assert "ret" in result
 
+    @pytest.mark.parametrize("line", ["\tld", "\tld ; note", "\tLD", "X:\tld", "\tinc",
+                                      "\tset", "\tres", "\tsrl", "\tldir"])
+    def test_an_instruction_without_its_operands_passes_through(self, line):
+        """No assembler takes a bare `ld', but the optimizer must not raise
+        on one: it looked for the target of a store in operands that were
+        not there."""
+        result = optimize(f"{line}\n\tld a,(PB)\n\tret\nPB:\n\tds 1\n")
+        assert line.split(";")[0].strip() in result
+
 
 class TestComplexSequences:
     """Test more complex optimization sequences."""

@@ -201,7 +201,7 @@ def _writes_through_pointer(op: str | None, operands: str) -> bool:
     if op != "ld" and op not in _WRITE_OPERAND:
         return False
     parts = split_operands(operands)
-    target = parts[0] if op == "ld" else parts[-1] if parts else ""
+    target = (parts[0] if op == "ld" else parts[-1]) if parts else ""
     return classify(target).kind in ("mem_hl", "mem_bc", "mem_de", "mem_idx")
 
 
