@@ -429,6 +429,12 @@ class _Routines:
             return False
         return h <= 0 and (eff.stack == -1 or (eff.stack == 0 and _split(code.lines[i])[1] == "ex"))
 
+    def pushed(self, i: int) -> bool:
+        """May the stack hold more at line ``i`` than where its routine was
+        entered: is the height there other than 0, or not known?  (Not at a
+        line nothing reaches.)"""
+        return self.height[i] != 0 and (self.open[i] or bool(self.entries[i]))
+
     def continuations(self, i: int) -> list[int] | None:
         """The lines a ``ret`` at line ``i`` may return to, or None if any."""
         if self.open[i] or self.wild[i] or not self.entries[i]:
@@ -1743,8 +1749,12 @@ class PeepholeOptimizer:
                     continue
                 # Jumped to, a routine finds its caller's return address
                 # where it looked for its own.  One of this text's that
-                # takes it off the stack has to be called.
-                if pattern.name == "tail_call" and code.moves_return(instrs[0][1]):
+                # takes it off the stack has to be called.  So does any
+                # routine where the caller may have pushed its arguments,
+                # which one of another module may take off the stack
+                # (`push bc / call SHOWP / ret').
+                if pattern.name == "tail_call" and (code.moves_return(instrs[0][1]) or
+                                                    code.routines.pushed(instruction_lines[0])):
                     continue
                 # A store through a register may land in the slot the push
                 # fills, where the text makes a pointer from SP, and change

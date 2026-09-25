@@ -213,6 +213,21 @@ def test_a_tail_call_out_of_the_text_is_made(src):
     assert not any(line.startswith("call ") for line in instrs(optimize(src)))
 
 
+def test_no_tail_call_where_the_caller_may_have_pushed():
+    """`push bc / call SHOWP / ret' as `push bc / jp SHOWP' leaves BC where
+    SHOWP's return address was.  SHOWP, of another module, takes its
+    argument off the stack: jumped to, it takes QQ's return address for
+    the argument, and returns to BC."""
+    entry = "\tcall QQ\n\tld de,0\n\tjp 0\nSHOWP:\n\tpop hl\n\tpop de\n\tpush hl\n\tld hl,0\n\tret\n"
+    src = "\textrn SHOWP\nQQ:\n\tld bc,1234h\n\tpush bc\n\tcall SHOWP\n\tret\n"
+    out = assert_equivalent(src, entry=entry)
+    assert "call SHOWP" in instrs(out)
+    # Nor where how much is on the stack is not known.
+    assert "call EXT" in instrs(optimize("\textrn EXT\n\tld sp,hl\n\tcall EXT\n\tret\n"))
+    # Code that nothing reaches is not run.
+    assert "call EXT" not in instrs(optimize("\textrn EXT\n\tjp 0\nP:\n\tcall EXT\n\tret\n"))
+
+
 def test_a_routine_that_writes_through_a_pointer_where_none_is_made_from_sp():
     """Where the text makes no pointer from SP, a write through a pointer
     does not reach a return address, and P's `ret' goes back to its call."""

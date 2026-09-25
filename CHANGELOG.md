@@ -109,6 +109,15 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   5`), are taken to be outside the text. On the corpus this costs 14
   bytes: five tail calls in each of the two builds of PIP.PLM, whose `DO
   CASE` goes through `jp (hl)`.
+- **`push bc / call SHOWP / ret` became `push bc / jp SHOWP`,** as in
+  0.2.5. Jumped to, SHOWP finds BC where its return address was, and its
+  caller's return address where BC was. SHOWP here is in another module
+  and takes its argument off the stack (`pop hl / pop de / push hl`). It
+  took the return address for the argument and returned to BC, and the
+  program hung. No tail call is now made where the caller may have pushed
+  something: where the stack height at the `call` is other than 0, or not
+  known, as after `ld sp,hl`. On the corpus this costs one byte, in
+  LOAD.PLM.
 
 ### Added
 
@@ -124,10 +133,11 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   tail calls above, three ways. Each runs the code before and after
   optimization, and fails on 0.2.5. So do the tail calls to RTN through a
   name in lower case, an equate, `jp (hl)`, `jp (ix)`, `jp (iy)` and `push
-  hl / ret`, and those to a routine that goes on to code that pops what its
-  caller pushed, or reads through its caller's pointer. Eleven more ways
-  for a routine to go where the optimizer cannot follow each keep the
-  call. `tests/z80sim.py` now jumps to a name an equate sets to a label.
+  hl / ret`, those to a routine that goes on to code that pops what its
+  caller pushed, or reads through its caller's pointer, and the tail call
+  to SHOWP. Eleven more ways for a routine to go where the optimizer
+  cannot follow each keep the call. `tests/z80sim.py` now jumps to a name
+  an equate sets to a label.
 - `tests/peepfuzz.py`: half the programs now also call a routine that
   stores its parameter at its entry, between two neighbours in storage the
   program defines, and then read the byte or not, by its own name or from
@@ -146,16 +156,22 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   ld (x),a / pop af` → the instruction in the middle, assume that x is not
   the slot the push fills. Code outside the text is taken to change no
   return address but its own, and not to reach below the SP it is called
-  with. Nor is it taken to hand back a pointer into the stack, as a
-  routine of another module that returns SP in HL would: only this text's
-  pointers made from SP count. Nor, where it is handed such a pointer, to
-  read through it what is above its own return address, which a tail
-  call in this text changes: `W: ld hl,0 / add hl,sp / dec hl / dec hl /
-  call RB / ret` with `RB: call EXT / ld a,1 / ret` still becomes `jp
-  RB`, and EXT reads its own return address through HL, not RB's.
-  Taking every routine that calls out of the text, where the text makes
-  such a pointer, to read above its return address costs 16 bytes in four
-  outputs of the corpus.
+  with. It is taken to come back with SP where it was before the call, not
+  to take off the stack what its caller pushed. Called where its caller
+  has pushed nothing, it is taken not to read above its return address,
+  where its caller's return address is: `call EXT / ret` becomes `jp EXT`,
+  and so does `call 5 / ret`. A number, or a name an `equ` sets to one, is
+  taken to be an address outside the text, even where the text places
+  itself with `org`. Nor is it taken to hand back a pointer into the
+  stack, as a routine of another module that returns SP in HL would: only
+  this text's pointers made from SP count. Nor, where it is handed such a
+  pointer, to read through it what is above its own return address, which
+  a tail call in this text changes: `W: ld hl,0 / add hl,sp / dec hl / dec
+  hl / call RB / ret` with `RB: call EXT / ld a,1 / ret` still becomes `jp
+  RB`, and EXT reads its own return address through HL, not RB's. Taking
+  every routine that calls out of the text, where the text makes such a
+  pointer, to read above its return address costs 16 bytes in four outputs
+  of the corpus.
 - **A program is taken not to depend on the size of its code,** which
   every rewrite changes. Dead-store elimination relies on this: an
   address is not computed across an instruction. A table of `jp`
