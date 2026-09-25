@@ -21,8 +21,12 @@ loops, into a routine of the module that is called and back, from a `ret` to
 the line after each call of the routine, and through a `push` to the `pop`
 that takes it off the stack. A path that leaves what the text shows counts
 as reading everything. Such paths go through a call or a jump to a label
-defined elsewhere, `call 5`, `jp 0`, `jp (hl)`, a `ret` from a routine that
-is `public` or whose address is taken, data, or the end of the text.
+defined elsewhere, `call 5`, `jp 0`, `jp (hl)`, data, or the end of the
+text. They also go through a `ret` from a routine that another module may
+call, or that may not return to its call. Another module may call a routine
+that is `public`, exported with M80's `NAME::`, or whose address is taken.
+A routine may not return to its call if it takes its return address off the
+stack, or returns where the stack height is not known.
 
 ### Fixed
 
@@ -38,9 +42,7 @@ is `public` or whose address is taken, data, or the end of the text.
   at a branch, and took HL for dead twelve instructions on. So `W = (B :=
   9)`, which is `ld hl,9 / ld a,l / ld (b),a / ld (w),hl / ld hl,3`, stored
   whatever HL held. uplm80's `LOW(SIZE(x))` and `w1, w0 = (sb := ...)`
-  stored it too (uplm80's difftest seeds 80071 and 1063). The byte loaded is
-  now the constant's low byte as well: `ld hl,299 / ld a,l` became `ld
-  a,299`, which does not assemble.
+  stored it too (uplm80's difftest seeds 80071 and 1063).
 - **`ld a,(ix+n) / inc a / ld (ix+n),a` became `ld hl,ix+n / inc (hl)`,**
   which is not a Z80 instruction. Likewise `ld a,(hl) / inc a / ld (hl),a`
   became `ld hl,hl`. A REENTRANT procedure's BYTE loop did not assemble at
@@ -88,6 +90,19 @@ is `public` or whose address is taken, data, or the end of the text.
   became `xor a / ld (hl),a / ld hl,0`.
 - **`ld l,(hl)` twice was taken for one,** although the first changes the
   address the second reads.
+- **A routine that puts another address in place of its return address
+  was taken to return to its call.** `ex (sp),hl / ret` goes to HL, and
+  `pop hl / push de / ret` goes to DE. So before `call dispatch`, `ld a,0`
+  became `xor a`, because the code after the call writes the flags. But the
+  code that `dispatch` really goes to reads the carry. Now:
+  - A routine that takes its return address off the stack can return
+    anywhere. That is a `pop` or `ex (sp),rr` where nothing of the routine's
+    own is pushed.
+  - After a call of such a routine, the stack height is not known. The same
+    is true after a call of a routine that returns where the height is not
+    known.
+  - `call x / ret` is not made `jp x` for such a routine. Entered by a jump,
+    it finds its caller's return address where it looks for its own.
 - **`call cc,x / ret` became `jp cc,x`,** which goes on, instead of
   returning, when the condition fails.
 - **A label after `ret cc` was taken for unreachable.** When nothing named
@@ -125,12 +140,27 @@ is `public` or whose address is taken, data, or the end of the text.
   uplm80 writes for `AT`, as a use of PARAM. It did catch the column-1 form
   `NAME equ PARAM`. It also did not count a sixteen-bit load from the byte
   before the stored one.
+- **Dead-store elimination removed stores that something else could read.**
+  It now removes a store only to storage that the module defines (`ds`,
+  `db` or `dw`) and does not export. 0.2.4 removed `ld (BUF+1),a` when BUF
+  was any of these:
+  - set with `equ`, which can be an address outside the program, or
+    another name for the same bytes;
+  - exported with `public` or `BUF::`;
+  - not defined in the module.
+
+  It also removed a store when the load of the same byte was written in a
+  different way, such as `ld a,(BUF + 13)` or `ld a,(BUF+0DH)`.
+- **Under `.radix 16`, `ld de,64 / call ??mul16` became six shifts.** Under
+  that radix, 64 is 100. A constant is now taken only where its value is the
+  same under any radix: a single digit, or a number with the suffix H, O or
+  Q. That is the case wherever the text sets a radix other than ten.
 
 ### Changed
 
 - **Before an exit, a rewrite is no longer made.** That applies where the
   flags or registers it changes reach a call out of the module, a `ret` from
-  a `public` routine, `jp 0` or the end of the text. What is there may read
+  an exported routine, `jp 0` or the end of the text. What is there may read
   them, and the text does not say whether it does. For uplm80 this is
   mostly `call 5`, which reads no flags. Over the MP/M II and 80un PL/M
   sources, which are 92 compiles, uplm80 0.3.6 at `-O2` now gets fewer of
@@ -151,9 +181,9 @@ is `public` or whose address is taken, data, or the end of the text.
   - 140 more `ld hl,n / ld r,l` are shortened, because the check that HL is
     dead now sees past branches, calls and returns.
 
-  The code is 485 bytes smaller than with 0.2.4 (172,874 against 173,359),
-  and 219 bytes smaller with uplm80's fix/expression-types branch. At `-O1`
-  and `-O3` it is smaller by 135 to 493 bytes. PIP grows the most: 15 bytes
+  The code is 479 bytes smaller than with 0.2.4 (172,880 against 173,359),
+  and 213 bytes smaller with uplm80's fix/expression-types branch. At `-O1`
+  and `-O3` it is smaller by 132 to 487 bytes. PIP grows the most: 15 bytes
   at `-O2` (23 with fix/expression-types), and up to 63 at `-O3`.
 - 0.2.4 made 22,679 rewrites on those sources, over `-O1` to `-O3` and both
   uplm80 versions. None of them changed a register or flag that the text
@@ -170,9 +200,26 @@ is `public` or whose address is taken, data, or the end of the text.
   `ld a,NAME`, a one-byte field holding part of a relocatable or external
   address. um80 and ul80 fill that in with the low byte, so for uplm80 it
   was right, but an assembler without byte relocation rejects it. The
-  constant is kept as written when it is 0 to 255, and otherwise its low
-  byte is written in decimal.
-- About three times faster than 0.2.4 on the corpus.
+  constant is kept as written when it is 0 to 255. Otherwise its low byte is
+  written in hexadecimal with the suffix H (`ld hl,299 / ld a,l` →
+  `ld a,02Bh`), which has the same value under any `.radix`. 0.2.4 wrote
+  `ld a,299`. um80 assembles that as the low byte without an error or
+  warning, but it is out of range, and other assemblers need not accept it.
+- About four times faster than 0.2.4 on the corpus. Where a pass has
+  already found a register or flag dead or live from a line, it does not
+  look again. So straight code with no write to what is asked about now
+  costs time in proportion to its length. 3000 copies of `ld a,0 /
+  ld (v),a` take 3.9 s, where 0.2.4 takes 13.7 s, timed one after the
+  other on the same machine.
+- No tail call is made to a routine of the text whose stack height is not
+  known at its `ret`. There are two such routines on the corpus: MP/M LOAD's
+  BOOT, which restores SP from a saved copy and returns, and uplm80's
+  REENTRANT procedures, which restore SP from IX. The tail calls would be
+  correct, but the optimizer cannot tell them from calls of a routine that
+  looks under its return address. This costs 30 tail calls, of one byte
+  each, over the corpus's six sets of compiles. It also costs one `cp 0`
+  → `or a` in ED at `-O3`, after a call of a routine that jumps into code
+  that sets SP.
 - `PeepholePattern` takes `clobbers`, the registers and flags a replacement
   leaves different. It also takes `dead_from`, the instruction of the match
   from which they must be dead. A custom pattern is applied only where they
@@ -188,25 +235,30 @@ is `public` or whose address is taken, data, or the end of the text.
   six flags and memory (`tests/simcheck.py`).
 - `tests/peepfuzz.py`, a differential tester. It builds random programs
   around every shape the optimizer rewrites: straight-line code, branches,
-  loops, calls and returns, pushes and pops, conditional calls, and
-  routines that return to a pushed address. It runs each program before and
-  after optimization from random states, and compares every register, flag
-  and byte of memory. 0.2.4 differs on 227 of the first 300 programs. This
-  release differs on none of 7,500, 1,500 of them two and a half times the
-  usual length. `tests/test_fuzz.py` runs 300 of them in the suite.
+  loops, calls and returns, pushes and pops, conditional calls, routines
+  that return to a pushed address, and routines that swap their return
+  address for another. It runs each program before and after optimization
+  from random states, and compares every register, flag and byte of
+  memory. Where a program exports a routine with `::`, it also calls that
+  routine from outside, as another module would. 0.2.4 differs on 214 of
+  the first 300 programs. This release differs on none of 7,500: 6,000 of
+  the usual length and 1,500 two and a half times as long.
+  `tests/test_fuzz.py` runs 300 of them in the suite.
 - Regression tests for each defect above: `tests/test_liveness.py`,
   `test_instructions.py`, `test_relative_jumps.py` and
   `test_control_flow.py`. Each test runs the code before and after
-  optimization, or checks its output. 61 of their 64 tests fail on 0.2.4.
-  Of the other three, two check that a rewrite is still made where it may
-  be. The third checks that the new call-following does not skip the path
-  where a conditional call is not made.
+  optimization, or checks its output. 70 of their 75 tests fail on 0.2.4.
+  Of the other five, two check that a rewrite is still made where it may
+  be. One checks that the new call-following does not skip the path where
+  a conditional call is not made. Two check that `NAME::` is taken for an
+  exported label, which 0.2.4, following no calls, did not need.
 
 ### Known issues
 
 - **Dead-store elimination rests on what PL/M's storage allocation
   guarantees.** It removes a parameter's store at a procedure's entry when
-  no line of the module names the location other than to store to it. Code
+  the location is storage the module defines and does not export, and no
+  line of the module names the location other than to store to it. Code
   could still read the location through an address computed from another
   name. In uplm80's output such a read belongs to another procedure's
   overlaid locals, which that procedure writes before it reads. The text
@@ -214,3 +266,34 @@ is `public` or whose address is taken, data, or the end of the text.
 - **A compiler cannot yet say what the code outside its text reads.** A
   PL/M program's BDOS calls and calls between its modules read no flags,
   and saying so would make back most of the rewrites listed under Changed.
+- **uplm80 0.3.6 fails one of its own 112 tests with this release.** The
+  test is
+  `TestFoldedRelationalMatchesTheRuntimeValue::test_every_level_computes_it_the_same_way`.
+  It requires `-O0`, which runs
+  no peephole, to write the same instructions as `-O1` to `-O3`. This
+  release makes `ld hl,1 / ld a,l` into `ld a,1` there, which is correct:
+  HL is dead, because `ld l,a / ld h,0` follows. 0.2.4 did not look past
+  the branch in between. uplm80's fix/expression-types branch changes the
+  test. uplm80 0.3.6 asks for `upeepz80>=0.2.4`, so release this after
+  uplm80 0.3.7. Otherwise 0.3.6's tests fail when it is installed with this
+  release.
+- **The stack is taken to be used only as calls and pushes use it.** A
+  called routine is taken to return to its call with the stack as it was.
+  The exceptions are routines that the text shows taking their return
+  address off the stack, or returning where the stack height is not known.
+  The optimizer cannot see a routine outside the text do this. Nor can it
+  see a routine change its return address through a pointer (`ld hl,0 /
+  add hl,sp / ld (hl),e`).
+  - For the same reason, `call x / ret` → `jp x` assumes that x does not
+    read the stack above its return address. uplm80's procedures that take
+    parameters on the stack do read it (`ld hl,2 / add hl,sp`). But their
+    callers pop the parameters after the call, so such a call is not
+    followed by `ret`.
+  - Memory below SP is taken to be unused. `push hl / pop hl` is removed,
+    and with it the copy of HL that it leaves below SP.
+  - Code that reads or writes its own instructions is not supported.
+- **A `.radix` other than ten affects the whole text.** Where the text has
+  one anywhere, even before the directive, only numbers whose value is the
+  same under every radix are known: a single digit, or a number with the
+  suffix H, O or Q. No other number is rewritten. A `ds` of such a number
+  ends a segment where relative jumps are measured.

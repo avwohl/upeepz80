@@ -99,7 +99,8 @@ The optimizer runs multiple phases:
 2. **Jump Threading** - Thread through intermediate jumps
 3. **Pattern Matching** once more, for what threading exposed
 4. **Dead Store Elimination** - Remove a parameter's store at procedure
-   entry when nothing reads it
+   entry when nothing reads it, to storage the module defines and does not
+   export
 5. **Relative Jumps** - Convert jp to jr, and dec b; jp nz to djnz, where the
    target is in reach; last, because it counts bytes
 
@@ -113,10 +114,14 @@ is. The optimizer knows what each Z80 instruction reads and writes
 (`upeepz80/z80.py`), and follows every path from the rewritten code: on,
 into both arms of a branch, round loops, into a routine the text calls and
 back, from a `ret` to every call of the routine, and through a `push` to its
-`pop`. A path that leaves what the text shows - a call or jump to a label
-defined elsewhere, `call 5`, `jp 0`, `jp (hl)`, a `ret` from a routine that
-is `public` or whose address is taken, data, the end of the text - counts as
-reading everything.
+`pop`. A path that leaves what the text shows counts as reading
+everything: a call or jump to a label defined elsewhere, `call 5`, `jp 0`,
+`jp (hl)`, data, or the end of the text. So does a `ret` from a routine that
+another module may call (`public`, `NAME::`, or its address taken), or that
+takes its return address off the stack (`ex (sp),hl / ret`).
+
+Numbers are read under the text's radix. Where it sets a `.radix` other than
+ten, only numbers that mean the same under any radix are rewritten.
 
 Every rewrite writes only instructions the Z80 has, and a relative jump is
 made only where its target is known to be within reach, counting bytes.
