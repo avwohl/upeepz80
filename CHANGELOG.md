@@ -151,6 +151,19 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
   `ret` after that goes anywhere. On the corpus this costs 24 bytes, all
   in the two builds of PIP.PLM. Each loses 5 tail calls, 3 `cp 0` → `or
   a`, 3 `ld a,0` → `xor a` and a `djnz`.
+- **`call CALLER / ret` became `jp CALLER` where CALLER calls a routine
+  that changes what is above its return address, and leaves by a jump.**
+  In `CALLER: call SWAP / jp EXT`, `SWAP: pop hl / pop de / ld de,THERE /
+  push de / push hl / ret` puts THERE in place of CALLER's return address.
+  Called, CALLER's return address is the `ret` after `call CALLER`, which
+  THERE's `ret` then runs. Jumped to, it is the return address of
+  CALLER's caller, and THERE's `ret` goes to what is above it. 0.2.5 did
+  the same, and the same where SWAP only reads the word. SWAP is
+  irregular, since it takes its return address off the stack, and so is
+  a routine that calls it and then returns, whose `ret` is at a height
+  not known. But one that leaves by a jump was not taken to read or
+  change anything above its return address. No tail call is now made to
+  a routine that calls an irregular one. Nothing changes on the corpus.
 
 ### Added
 

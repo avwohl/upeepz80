@@ -138,6 +138,31 @@ def test_a_return_address_changed_by_code_reached_where_it_cannot_be_followed(sr
     assert "ld a,0" in instrs(out)
 
 
+# SWAP puts THERE in place of its caller's return address: it takes its own
+# off the stack, and its caller's, and puts its own back.
+SWAP = "SWAP:\n\tpop hl\n\tpop de\n\tld de,THERE\n\tpush de\n\tpush hl\n\tret\nTHERE:\n\tld a,1\n\tret\n"
+SWAP_MAIN = "START:\n\tcall QQ\n\tld hl,0\n\tld de,0\n\tjp 0\n"
+
+
+@pytest.mark.parametrize("caller", [
+    "CALLER:\n\tcall SWAP\n\tjp EXT\n",
+    "CALLER:\n\tcall MID\n\tjp EXT\nMID:\n\tjp SWAP\n",
+    "CALLER:\n\tcall SWAP\n\tld b,3\nLOOP:\n\tdjnz LOOP\n\tjp EXT\n",
+    # PEEK only reads the word, and stores it.
+    "CALLER:\n\tcall PEEK\n\tjp EXT\nPEEK:\n\tpop hl\n\tpop de\n\tpush de\n\tpush hl\n"
+    "\tld (W),de\n\tret\n",
+])
+def test_no_tail_call_to_a_routine_whose_callee_changes_its_return_address(caller):
+    """CALLER leaves by a jump, not a `ret' at a height not known, so it
+    was not taken to come back irregularly, nor to read above its return
+    address; but SWAP changes the word above its own, CALLER's.  With `call CALLER', that is the
+    `ret' after it in QQ, which THERE's `ret' then runs; with `jp CALLER',
+    QQ's own return address, and THERE returns to what is above it."""
+    src = SWAP_MAIN + "QQ:\n\tcall CALLER\n\tret\n" + caller + SWAP
+    out = assert_equivalent(src, entry="\tjp START\nEXT:\n\tret\n")
+    assert "call CALLER" in instrs(out)
+
+
 def test_no_tail_call_to_a_routine_that_reads_above_its_return_address():
     """RD reads the word its caller's caller pushed, through a pointer from
     SP.  `call RD / ret' as `jp RD' leaves one return address fewer

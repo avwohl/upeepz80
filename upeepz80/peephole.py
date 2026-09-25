@@ -239,7 +239,10 @@ class _Routines:
     such a pointer, or reads through a pointer (which its caller may have
     made before the call), or calls code that does either, may read its
     return address or what is above it, which a tail call changes: it
-    ``peeks``.  A pointer into the stack is taken to come from this text,
+    ``peeks``.  So does code that calls an irregular routine, which may
+    have read or moved the word above its own return address: its
+    caller's.  (A caller that then returns is irregular itself; one that
+    leaves by a jump is not.)  A pointer into the stack is taken to come from this text,
     or from a module that calls it, which does not reach below the SP it
     calls with - not from a module this text calls, which hands none
     back, and reads nothing above its own return address through one it
@@ -372,10 +375,15 @@ class _Routines:
                         grew = True
             return found
 
+        # An irregular routine may read or move what is above its return
+        # address, which is its caller's (`SWAP: pop hl / pop de / ld
+        # de,THERE / push de / push hl / ret'): a caller that returns after
+        # the call is irregular itself, and one that leaves otherwise
+        # (`call SWAP / jp EXT') peeks.
         self.peeks = closed_over_calls(
             {root for root in roots
              if any(code.stack_pointers[i] or (code.stack_pointer and code.pointer_reads[i]) or
-                    lost(i) for i in reach[root])})
+                    lost(i) for i in reach[root])} | set(irregular))
         writes: set[int] = set()
         if code.stack_pointer:
             writes = closed_over_calls(
