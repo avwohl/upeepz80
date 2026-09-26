@@ -493,6 +493,36 @@ def test_a_table_of_jumps_entered_at_an_offset_computed_at_run_time(way):
     assert "jp H0" in instrs(out) and [x for x in instrs(out) if x.endswith("jp H1")], out
 
 
+# The same, with entries of four bytes: QQ goes to TABLE+4 or TABLE+8.
+JP4_TABLE = ("QQ:\n\tpush bc\n\tld a,(X)\n\tand 1\n\tinc a\n\tld l,a\n\tld h,0\n"
+             "\tadd hl,hl\n\tadd hl,hl\n\tld de,TABLE\n\tadd hl,de\n\tjp (hl)\n")
+JP4_ENTRIES = ("TABLE:\n\tjp H0\n\t{pad}\n\tjp H1\n\t{pad}\n\tjp H2\n\t{pad}\n"
+               "H0:\nH1:\n\tpop bc\n\tret\nH2:\n\tcall SHOWP\n\tret\n")
+
+
+@pytest.mark.parametrize("pad", ["nop", "db 0", "defb 0", "ds 1", "defs 1"])
+def test_a_table_of_jumps_padded_to_four_bytes_keeps_its_size(pad):
+    """The entries after the first `nop' counted as reached by nothing:
+    `jp H1' became `jr H1', so TABLE+8 was inside `jp H2', and H2's `call
+    SHOWP / ret' became `jp SHOWP', with QQ's argument still pushed.
+    (z80sim lays data out away from the code, so only `nop' is run.)"""
+    src = SHOWP_MAIN + JP4_TABLE + JP4_ENTRIES.format(pad=pad)
+    out = assert_equivalent(src, entry=SHOWP) if pad == "nop" else optimize(src)
+    assert "call SHOWP" in instrs(out), out
+    assert [x for x in instrs(out) if x in ("jp H0", "jp H1", "jp H2")] == \
+        ["jp H0", "jp H1", "jp H2"], out
+
+
+def test_a_table_of_relative_jumps_entered_at_an_offset_computed_at_run_time():
+    """`jr H1', at TABLE+2, counted as reached by nothing, and so did H1:
+    `call SHOWP / ret' became `jp SHOWP', with QQ's argument still pushed."""
+    src = (SHOWP_MAIN + "QQ:\n\tpush bc\n\tld a,(X)\n\tand 1\n\tld l,a\n\tld h,0\n\tadd hl,hl\n"
+           "\tld de,TABLE\n\tadd hl,de\n\tjp (hl)\nTABLE:\n\tjr H0\n\tjr H1\n"
+           "H0:\n\tpop bc\n\tret\nH1:\n\tcall SHOWP\n\tret\n")
+    out = assert_equivalent(src, entry=SHOWP)
+    assert "call SHOWP" in instrs(out), out
+
+
 BIOS_CALLER = ("\tjp START\nSTART:\n\tcall BIOS+3\n\tld (V),a\n\tcall BIOS+6\n\tld (W),a\n"
                "\tcall BIOS\n\tjp 0\n")
 
@@ -624,3 +654,4 @@ def test_where_a_jump_or_call_the_program_patches_goes_is_not_known(src):
     a,0' became `xor a'."""
     out = optimize(src + FLAG_VEC)
     assert "ld a,0" in instrs(out), out
+

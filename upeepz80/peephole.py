@@ -68,6 +68,8 @@ _SWAP = {"d": "h", "e": "l", "h": "d", "l": "e"}
 # Directives that give a name a value.  Only an `equ' gives it one value
 # throughout; the others may be redefined further down.
 _EQUATES = ("equ", "defl", "set", "=")
+# What may pad the entries of a table of jumps (_Code._vectors).
+_PADDING = frozenset({"nop", "db", "defb", "ds", "defs"})
 
 
 @lru_cache(maxsize=1 << 16)
@@ -917,11 +919,13 @@ class _Code:
         known; the table of ``jp`` instructions entered at an offset, as
         that code does, or the vector that a BIOS exports its first label
         of, and that other modules enter at BIOS+3, BIOS+6..., is the
-        pattern: a label that ``jp`` instructions follow, which the text
-        names other than as where a jump or call goes, or exports.  Each of
-        them is frozen, and may be entered from anywhere.  After a label
-        the text exports, each is patched too: another module may patch a
-        BIOS's vector.
+        pattern: a label that ``jp`` or ``jr`` instructions follow, which
+        the text names other than as where a jump or call goes, or exports,
+        with or without padding between them (``jp H0 / nop / jp H1 /
+        nop``).  Each jump is frozen, and may be entered from anywhere, and
+        the padding is frozen too (:meth:`_vectors`).  After a label the
+        text exports, each jump is patched as well: another module may
+        patch a BIOS's vector.
 
         Sizes are the optimizer's own (:meth:`layout`).  Where the address
         cannot be worked out - an expression other than NAME+N or NAME-N,
@@ -1058,8 +1062,9 @@ class _Code:
 
     def _vectors(self, labels: dict[str, int], entries: set[int], frozen: set[int],
                  patched: set[int]) -> None:
-        """The ``jp`` instructions after a label that the text names other
-        than as where a jump or call goes, or exports: a table of jumps
+        """The ``jp`` and ``jr`` instructions after a label that the text
+        names other than as where a jump or call goes, or exports, and the
+        padding between them (``nop``, ``db``, ``ds``): a table of jumps
         that may be entered at an offset computed at run time, or a vector
         of them that another module may enter so, and patch
         (_offsets_found)."""
@@ -1073,8 +1078,13 @@ class _Code:
                 eff = effects[j]
                 if eff is None or (eff.size == 0 and eff.flow == "next"):
                     continue
-                if eff.flow != "jump" or _split(self.lines[j])[1] != "jp" or \
-                        eff.target is None:
+                op = _split(self.lines[j])[1]
+                if op in _PADDING:
+                    # Entries of four bytes: `jp H0 / nop / jp H1 / nop'.
+                    if eff.flow != "data":
+                        frozen.add(j)
+                    continue
+                if eff.flow != "jump" or op not in ("jp", "jr") or eff.target is None:
                     break
                 frozen.add(j)
                 entries.add(j)
