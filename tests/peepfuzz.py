@@ -458,7 +458,10 @@ class Gen:
                 at = g3.randrange(len(out))
                 if out[at].endswith(":") or out[at].startswith(("ret", "jp 0")):
                     continue
-                call = [g3.choice(["push de", "push bc", "push hl"]), "call ??S5"]
+                # The argument is a number: a register may hold the address of
+                # code, which differs once optimized, and ??S5 stores it.
+                pair = g3.choice(["de", "bc", "hl"])
+                call = [f"ld {pair},{g3.randrange(0x10000)}", f"push {pair}", "call ??S5"]
                 if g3.random() < 0.5:
                     call = self.seed(allow_b=True) + call
                 if g3.random() < 0.5:
