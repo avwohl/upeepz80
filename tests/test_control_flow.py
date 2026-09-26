@@ -520,3 +520,20 @@ def test_a_table_only_jumped_through_is_threaded():
     # Where the code there reads HL, which holds C0 or DONE, it is not.
     src = src.replace("DONE:\n\tld hl,0\n", "DONE:\n\tld (W),hl\n\tld hl,0\n")
     assert "dw DONE" not in instrs(optimize(src))
+
+
+@pytest.mark.parametrize("read", [
+    "\tdec de\n\tld a,(de)\n",
+    "\tex de,hl\n\tdec hl\n\tld a,(hl)\n",
+])
+def test_a_table_whose_target_reads_the_entry_through_de_is_not_threaded(read):
+    """The dispatch leaves DE pointing at the entry's high byte, and DONE
+    reads the low byte through it: C0's, which it compares with C0, in the
+    table as it was, and DONE's once `dw C0' became `dw DONE'."""
+    src = ("\tld a,(X)\n\tand 1\n\tld l,a\n\tld h,0\n\tadd hl,hl\n\tld de,TBL\n\tadd hl,de\n"
+           "\tld e,(hl)\n\tinc hl\n\tld d,(hl)\n\tex de,hl\n\tjp (hl)\nTBL:\n\tdw C0\n\tdw C1\n"
+           "C0:\n\tjp DONE\nC1:\n\tld a,1\n\tjp DONE\nDONE:\n" + read +
+           "\tld hl,C0\n\tcp l\n\tld a,0\n\tjr z,EQ\n\tinc a\nEQ:\n\tld (V),a\n"
+           "\tld hl,0\n\tld de,0\n\tret\n")
+    out = assert_equivalent(src, ignore=range(DATA_BASE, DATA_BASE + 4))
+    assert "dw C0" in instrs(out), out

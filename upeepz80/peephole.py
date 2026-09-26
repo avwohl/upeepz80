@@ -2717,7 +2717,9 @@ class PeepholeOptimizer:
         table starts, and control does not go on into the table: an entry
         is jumped to with the entry itself in HL, and a pointer to it in DE.
         The entry's label L is ``jp M``: jumped to, it goes on to M with L
-        in HL.  So ``dw M`` does the same where HL is not read at M."""
+        in HL, and DE pointing at L's high byte in the table.  Given M, the
+        dispatch goes there with M in HL, and M's high byte where DE points.
+        So ``dw M`` does the same where neither HL nor DE is read at M."""
         t = code.target(new)
         if t is None:
             return False
@@ -2754,7 +2756,8 @@ class PeepholeOptimizer:
             return False
         _, instrs, _, _ = window
         return [(op, arg.lower()) for op, arg in instrs] == \
-            [("ld", f"de,{table.lower()}")] + self._DISPATCH and not code.live([t], {"h", "l"})
+            [("ld", f"de,{table.lower()}")] + self._DISPATCH and \
+            not code.live([t], {"h", "l", "d", "e"})
 
     def _frozen_jump(self, code: _Code, lines: list[str], i: int) -> bool:
         """Is the jump that the label on line ``i`` stands before one that
