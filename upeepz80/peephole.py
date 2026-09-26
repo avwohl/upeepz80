@@ -141,6 +141,13 @@ def _names(text: str) -> frozenset[str]:
     return frozenset(n.lower() for n in _NAME.findall("".join(kept)))
 
 
+@lru_cache(maxsize=1 << 16)
+def _value_names(operands: str, direct: str | None) -> tuple[str, ...]:
+    """The names ``operands`` uses, lowercase, but ``direct``: where the
+    jump or call goes, spelled as the line spells it."""
+    return tuple({n.lower() for n in _IDENT.findall(operands) if n != direct})
+
+
 def _same_operand(a: str, b: str) -> bool:
     return a.replace(" ", "").lower() == b.replace(" ", "").lower()
 
@@ -380,7 +387,7 @@ class _Routines:
                     "$" in _names(_split(code.lines[idx])[2]):
                 open_roots.add(idx + 1)  # `jp $+3'
 
-        def successors(i: int) -> list[int]:
+        def after(i: int) -> list[int]:
             eff = effects[i]
             if eff is None or eff.flow == "next" or eff.flow == "call":
                 return [i + 1]
@@ -393,6 +400,7 @@ class _Routines:
             if eff.flow == "return" and eff.cond:
                 return [i + 1]
             return []
+        successors = [after(i) for i in range(n)].__getitem__
 
         self.open = [False] * (n + 1)
         self.entries: list[set[int]] = [set() for _ in range(n + 1)]
@@ -814,16 +822,16 @@ class _Code:
     def dest(self, i: int) -> int | None:
         """The line the jump, branch or call on line ``i`` goes to: the
         label it names, unless the program may patch it (:attr:`patched`)."""
-        if i in self.patched:
+        if i in self._offsets_found()[2]:
             return None
-        return self.target(self.effects[i].target)
+        return self.labels.get(self.effects[i].target)
 
     def lost(self, i: int) -> bool:
         """Does the jump, branch or call on line ``i`` go to an address of
         this text that is not followed: one the program may write over its
         operand (:attr:`patched`), or one :meth:`unfollowed` finds?"""
         target = self.effects[i].target
-        return i in self.patched or (target is not None and self.unfollowed(target))
+        return i in self._offsets_found()[2] or (target is not None and self.unfollowed(target))
 
     def unfollowed(self, name: str) -> bool:
         """Is ``name``, where a jump or call goes, an address in this text
@@ -860,9 +868,7 @@ class _Code:
                 if eff is not None and eff.flow in ("jump", "branch", "call") and \
                         self.target(eff.target) is not None:
                     direct = eff.target
-                for name in _IDENT.findall(operands):
-                    if name != direct:
-                        named.add(name.lower())
+                named.update(_value_names(operands, direct))
             self._named = named
         return self._named
 
