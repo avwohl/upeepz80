@@ -469,6 +469,30 @@ def test_no_tail_call_in_code_an_address_computed_from_a_label_reaches(way):
     assert "call SHOWP" in instrs(out), out
 
 
+# QQ goes to entry X of TABLE, computed at run time, with SHOWP's argument
+# pushed: H0 takes it off, H1 does not.
+JP_TABLE = ("QQ:\n\tpush bc\n\tld a,(X)\n\tand 1\n\tld l,a\n\tld h,0\n\tld d,h\n\tld e,l\n"
+            "\tadd hl,hl\n\tadd hl,de\n\tld de,TABLE\n\tadd hl,de\n\tjp (hl)\n")
+JP_ENTRIES = "\tjp H0\n\tjp H1\nH0:\n\tpop bc\n\tret\nH1:\n\tcall SHOWP\n\tret\n"
+
+
+@pytest.mark.parametrize("way", [
+    JP_TABLE + "TABLE:\n" + JP_ENTRIES,
+    JP_TABLE.replace("ld de,TABLE", "ld de,table") + "TABLE:\n" + JP_ENTRIES,
+    JP_TABLE.replace("ld de,TABLE", "ld de,TB") + "TB\tequ TABLE\nTABLE:\n" + JP_ENTRIES,
+    JP_TABLE.replace("ld de,TABLE", "ld de,(TP)") + "TP:\tdw TABLE\nTABLE:\n" + JP_ENTRIES,
+    JP_TABLE + "TABLE:\t; the table\n\n\tjp H0\n; the second entry\nT1:\tjp H1\n"
+    "H0:\n\tpop bc\n\tret\nH1:\n\tcall SHOWP\n\tret\n",
+])
+def test_a_table_of_jumps_entered_at_an_offset_computed_at_run_time(way):
+    """TABLE's second entry, `jp H1', counted as reached by nothing, and so
+    did H1: `call SHOWP / ret' became `jp SHOWP', with QQ's argument still
+    pushed.  And `jp H0' became `jr H0', so TABLE+3 was inside `jp H1'."""
+    out = assert_equivalent(SHOWP_MAIN + way, entry=SHOWP)
+    assert "call SHOWP" in instrs(out), out
+    assert "jp H0" in instrs(out) and [x for x in instrs(out) if x.endswith("jp H1")], out
+
+
 BIOS_CALLER = ("\tjp START\nSTART:\n\tcall BIOS+3\n\tld (V),a\n\tcall BIOS+6\n\tld (W),a\n"
                "\tcall BIOS\n\tjp 0\n")
 

@@ -354,19 +354,7 @@ class _Routines:
     def __init__(self, code: "_Code"):
         effects = code.effects
         n = len(effects)
-        named: set[str] = set()
-        for idx, line in enumerate(code.lines):
-            _, op, operands = _split(line)
-            if op is None or not operands:
-                continue
-            eff = effects[idx]
-            direct = None
-            if eff is not None and eff.flow in ("jump", "branch", "call") and \
-                    code.target(eff.target) is not None:
-                direct = eff.target
-            for name in _IDENT.findall(operands):
-                if name != direct:
-                    named.add(name.lower())
+        named = code.named
         self.calls: dict[int, list[int]] = {}
         for idx, eff in enumerate(effects):
             if eff is not None and eff.flow == "call":
@@ -809,6 +797,7 @@ class _Code:
             {name.lower() for name in seen_equ} - numbers
         self._layout: tuple[list[int], list[int], list[int]] | None = None
         self._routines: _Routines | None = None
+        self._named: set[str] | None = None
         self._offsets: tuple[set[int], set[int], set[int]] | None = None
         self._unfollowed: dict[str, bool] = {}
 
@@ -834,6 +823,29 @@ class _Code:
                 known = "$" in names or bool(names & self.defined)
             self._unfollowed[name] = known
         return known
+
+    @property
+    def named(self) -> set[str]:
+        """The names, lowercase, that the text uses other than as where a
+        jump or call goes (``ld hl,L``, ``dw L``, ``X equ L``, ``public L``,
+        ``jp L+3``)."""
+        if self._named is None:
+            named: set[str] = set()
+            effects = self.effects
+            for idx, line in enumerate(self.lines):
+                _, op, operands = _split(line)
+                if op is None or not operands:
+                    continue
+                eff = effects[idx]
+                direct = None
+                if eff is not None and eff.flow in ("jump", "branch", "call") and \
+                        self.target(eff.target) is not None:
+                    direct = eff.target
+                for name in _IDENT.findall(operands):
+                    if name != direct:
+                        named.add(name.lower())
+            self._named = named
+        return self._named
 
     @property
     def routines(self) -> _Routines:
@@ -874,13 +886,17 @@ class _Code:
         among them goes is not known, as the program may write another
         address over its operand (``ld (VEC+1),hl``).
 
-        Another module can compute such an address too, from a label the
-        text exports.  What it does with one is not known; the vector of
-        ``jp`` instructions that a BIOS exports its first label of, and
-        that other modules enter at BIOS+3, BIOS+6..., is the pattern: an
-        exported label that ``jp`` instructions follow.  Each of them is
-        frozen and patched (a program may patch a BIOS's vector), and each
-        may be entered from anywhere.
+        The program can compute such an address at run time too, from a
+        label it names (``ld de,TABLE / add hl,de / jp (hl)``), and another
+        module from a label the text exports.  Where it points is not
+        known; the table of ``jp`` instructions entered at an offset, as
+        that code does, or the vector that a BIOS exports its first label
+        of, and that other modules enter at BIOS+3, BIOS+6..., is the
+        pattern: a label that ``jp`` instructions follow, which the text
+        names other than as where a jump or call goes, or exports.  Each of
+        them is frozen, and may be entered from anywhere.  After a label
+        the text exports, each is patched too: another module may patch a
+        BIOS's vector.
 
         Sizes are the optimizer's own (:meth:`layout`).  Where the address
         cannot be worked out - an expression other than NAME+N or NAME-N,
@@ -1017,10 +1033,14 @@ class _Code:
 
     def _vectors(self, labels: dict[str, int], entries: set[int], frozen: set[int],
                  patched: set[int]) -> None:
-        """The ``jp`` instructions after a label the text exports: a vector
-        of jumps another module may enter at an offset (_offsets_found)."""
+        """The ``jp`` instructions after a label that the text names other
+        than as where a jump or call goes, or exports: a table of jumps
+        that may be entered at an offset computed at run time, or a vector
+        of them that another module may enter so, and patch
+        (_offsets_found)."""
         effects = self.effects
-        for name in self.exported | self.public:
+        exported = self.exported | self.public
+        for name in self.named | exported:
             b = labels.get(name)
             if b is None:
                 continue
@@ -1032,8 +1052,9 @@ class _Code:
                         eff.target is None:
                     break
                 frozen.add(j)
-                patched.add(j)
                 entries.add(j)
+                if name in exported:
+                    patched.add(j)
 
     def live(self, starts: list[int], resources: frozenset[str] | set[str]) -> bool:
         """May any of ``resources``, as they are at the lines ``starts``, be
