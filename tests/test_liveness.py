@@ -210,6 +210,17 @@ def test_liveness_follows_a_value_through_the_stack():
     assert instrs(optimize(src))[0] == "ld a,5"
 
 
+def test_a_routine_that_takes_its_argument_off_the_stack_returns_to_its_call():
+    """P, written to PL/M-80's convention, takes the argument pushed for it
+    off the stack, and comes back to its call with the stack a word lower,
+    where `cp b' writes the flags: `ld a,0' is `xor a'.  0.2.6 took P to
+    return anywhere, as one that moves its return address."""
+    src = ("\tld bc,1234h\n\tld a,0\n\tpush bc\n\tcall P\n\tcp b\n\tjp 0\n"
+           "P:\n\tpop hl\n\tex (sp),hl\n\tld (W),hl\n\tld hl,0\n\tret\n")
+    out = assert_equivalent(src)
+    assert "xor a" in instrs(out), out
+
+
 @pytest.mark.parametrize("before", [
     # DE is made to point at where the push will put H.
     "\tld hl,0\n\tadd hl,sp\n\tdec hl\n\tex de,hl\n",

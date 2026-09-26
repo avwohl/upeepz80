@@ -386,3 +386,65 @@ def test_dead_store_read_spelled_otherwise_is_kept():
         assert "(BUF+13),a" in optimize(f"\tcall P\n\t{load}\n" + tail), load
     for load in ("ld a,(BUF+12)", "ld hl,(BUF+14)", "ld a,(BUF)", "ld (BUF+13),hl"):
         assert "(BUF+13),a" not in optimize(f"\tcall P\n\t{load}\n" + tail), load
+
+
+# ---- Where the return address is ---------------------------------------------
+#
+# A `ret' goes back to the call only where the return address its routine was
+# entered with is at the top of the stack.  Where it may not be, it goes where
+# the optimizer cannot follow, and the code there may be entered with what the
+# routine's caller pushed still on the stack.
+
+HND = "HND:\n\tcall SHOWP\n\tret\n"
+
+
+@pytest.mark.parametrize("way", [
+    # DSP puts HND in place of its return address.
+    "QQ:\n\tpush bc\n\tld hl,HND\n\tcall DSP\n\tld a,1\n\tret\nDSP:\n\tex (sp),hl\n\tret\n",
+    # PEEK reads what QQ pushed above its return address, so the height
+    # after its call is not known, and QQ's `ret' takes HND.
+    "QQ:\n\tpush bc\n\tld hl,HND\n\tpush hl\n\tcall PEEK\n\tret\n"
+    "PEEK:\n\tpop de\n\tpop hl\n\tpush hl\n\tpush de\n\tld de,0\n\tret\n",
+    # W writes HND over its return address, through a pointer from SP.
+    "QQ:\n\tpush bc\n\tcall W\n\tld a,1\n\tret\nW:\n\tld hl,0\n\tadd hl,sp\n\tld de,HND\n"
+    "\tld (hl),e\n\tinc hl\n\tld (hl),d\n\tld hl,0\n\tld de,0\n\tret\n",
+    # EXT, of another module, returns to HND, which QQ pushed.
+    "QQ:\n\tpush bc\n\tld hl,HND\n\tpush hl\n\tjp EXT\n",
+])
+def test_no_tail_call_where_a_ret_that_may_not_go_back_leaves_an_argument_pushed(way):
+    """QQ pushes SHOWP's argument, and a `ret' goes to HND, where the
+    optimizer took it to go back to a call.  HND's height, counted from its
+    label, is 0, and `call SHOWP / ret' became `jp SHOWP'."""
+    out = assert_equivalent(SHOWP_MAIN + way + HND, entry=SHOWP + "EXT:\n\tret\n")
+    assert "call SHOWP" in instrs(out), out
+
+
+def test_no_tail_call_to_a_routine_that_pops_where_the_height_is_not_known():
+    """AA pushes BC and goes on into SUBR, which QQ calls: SUBR's height is
+    not known, and its `pop hl' takes the return address where QQ calls
+    it.  Jumped to, it took QQ's."""
+    src = ("START:\n\tcall QQ\n\tld bc,1234h\n\tcall AA\n\tld hl,0\n\tjp 0\n"
+           "QQ:\n\tcall SUBR\n\tret\nAA:\n\tpush bc\nSUBR:\n\tpop hl\n\tld (V),hl\n\tjp EXT\n")
+    out = assert_equivalent(src, entry="\tjp START\nEXT:\n\tret\n")
+    assert "call SUBR" in instrs(out), out
+
+
+def test_a_tail_call_where_the_return_address_is_on_top():
+    """Q has taken its argument off the stack: its return address is on
+    top, a word higher than it was entered, and RX, jumped to, returns to
+    Q's caller as Q would."""
+    src = ("\tld bc,1234h\n\tpush bc\n\tcall Q\n\tld hl,0\n\tjp 0\n"
+           "Q:\n\tpop hl\n\tex (sp),hl\n\tld (W),hl\n\tcall RX\n\tret\nRX:\n\tld hl,5\n\tret\n")
+    out = assert_equivalent(src)
+    assert "call RX" not in instrs(out), out
+
+
+def test_a_routine_whose_callee_takes_its_return_address_goes_anywhere():
+    """P takes QQ's return address for its argument: QQ's `ret' goes to
+    THERE, which reads the carry, not back to the call, after which `cp b'
+    writes the flags."""
+    src = ("\tld hl,THERE\n\tpush hl\n\tcall QQ\n\tcp b\n\tjp 0\nQQ:\n\tscf\n\tld a,0\n"
+           "\tcall P\n\tret\nTHERE:\n\tld b,0\n\tjr nc,L1\n\tld b,1\nL1:\n\tjp 0\n"
+           "P:\n\tpop hl\n\tex (sp),hl\n\tld (W),hl\n\tld hl,0\n\tret\n")
+    out = assert_equivalent(src)
+    assert "ld a,0" in instrs(out), out

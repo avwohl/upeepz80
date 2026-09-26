@@ -9,7 +9,8 @@ sequences the optimizer rewrites, with random operands and random code
 before and after them.  Half of them also call a routine that stores its
 parameter at its entry, between two neighbours in storage the program
 defines, and read the byte or not, by its own name or from a neighbour's
-address.  The program and its optimized version are run on
+address.  A quarter also call a routine that takes an argument its caller
+pushed off the stack.  The program and its optimized version are run on
 :mod:`tests.z80sim` from the same random register, flag and memory states,
 and must end in the same state: every register, every flag (bits 3 and 5
 aside) and all of memory outside the stack below SP and that storage.  The
@@ -447,6 +448,36 @@ class Gen:
             subs += ["PS:", "ld (PSB),a"] + (reads if inside else []) + ["ret"]
             out = [f"ld a,{g2.randrange(256)}", "call PS"] + ([] if inside else reads) + out
             data = STORAGE
+        # A quarter of them also call ??S5, which takes an argument its
+        # caller pushed off the stack, as a routine written to PL/M-80's
+        # convention does: it comes back to the call with the stack a word
+        # lower.  (A random stream of its own leaves the rest as it was.)
+        g3 = random.Random(g.random())
+        if g3.random() < 0.25:
+            for _ in range(g3.randrange(1, 4)):
+                at = g3.randrange(len(out))
+                if out[at].endswith(":") or out[at].startswith(("ret", "jp 0")):
+                    continue
+                call = [g3.choice(["push de", "push bc", "push hl"]), "call ??S5"]
+                if g3.random() < 0.5:
+                    call = self.seed(allow_b=True) + call
+                if g3.random() < 0.5:
+                    call.append(g3.choice(["adc a,0", "sbc a,a", "rla", "daa", "ld (V2),a"]))
+                out[at:at] = call
+            body = []
+            for _ in range(g3.randrange(0, 3)):
+                body += self.seed(allow_b=True) if g3.random() < 0.5 else self.instr()
+            body += g3.choice([["pop hl", "ex (sp),hl", "ld (V3),hl", f"ld hl,{self.word()}"],
+                               ["pop hl", "pop de", "push hl", "ld (V3),de", f"ld de,{self.word()}",
+                                f"ld hl,{self.word()}"]])
+            for _ in range(g3.randrange(0, 3)):
+                body += self.seed(allow_b=True) if g3.random() < 0.5 else self.instr()
+            if g3.random() < 0.3:
+                body += ["call ??S2"]  # at the height the call left, then return
+            body += [g3.choice(["cp b", "or a", "xor a", "inc a", "scf", "nop"])]
+            body += [f"{lab}:" for lab in self.pending]
+            self.pending = []
+            subs += ["??S5:"] + body + ["ret"]
         text = []
         for line in out + subs:
             text.append(line if line.endswith(":") else "\t" + line)

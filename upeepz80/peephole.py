@@ -208,8 +208,16 @@ def _writes_through_pointer(op: str | None, operands: str) -> bool:
     return classify(target).kind in ("mem_hl", "mem_bc", "mem_de", "mem_idx")
 
 
-# A stack height where nothing reaches (_Routines._heights).
+# A stack height where nothing reaches (_Routines._flow).
 _UNSET = object()
+# A place on the stack not known: what a pop takes where the height is not.
+_ANY = object()
+_NOWHERE: frozenset = frozenset()
+# The register pairs a return address can be kept in, as a whole.
+_KEEPERS = ("bc", "de", "hl", "ix", "iy")
+# How many rounds the summaries of routines may change freely before one
+# that changes again is taken to be not known (_Routines).
+_FREE_ROUNDS = 8
 
 
 class _Routines:
@@ -219,65 +227,96 @@ class _Routines:
     ``ld hl,L``, ``dw L``, ``public L``, ``L::`` or ``X equ L``, and no jump
     spelled differently from the label.  Its code is what can be reached
     from the label without going into a call.  A ``ret`` in code that only
-    routines reach returns to the line after one of their calls.  Code that
-    can be reached any other way - from the first line, from a label
-    something names or the module exports, from after data, a directive,
-    ``jp (hl)`` or an instruction not recognised - may have been entered
-    from anywhere, and so may its ``ret`` go anywhere.
+    routines reach returns to the line after one of their calls, if it
+    takes the return address the call pushed.  Code that can be reached any
+    other way - from the first line, from a label something names or the
+    module exports, from after data, a directive, ``jp (hl)`` or an
+    instruction not recognised - may have been entered from anywhere, and
+    so may its ``ret`` go anywhere.
 
-    ``height`` is the number of pushes outstanding since the routine was
-    entered, where every way to a line agrees on it, else None.
+    ``height`` is the number of words pushed since the routine was entered,
+    less those popped, where every way to a line agrees on it, else None.
+    Positions on the stack are counted the same way: the return address
+    the call pushed is at 0, the word the caller pushed before the call at
+    -1, and a push at height h fills h + 1.  ``places`` is where the return
+    address is, where every way to the line agrees: at a position (a
+    ``pop`` takes it from there, an ``ex (sp),hl`` swaps it with HL, a
+    ``push`` of the pair that holds it puts it back), or in a register pair.
+    A ``ret`` goes back to the call only where the address is at the top of
+    the stack.  So does a jump out of the text, whose code is taken to
+    return to what is there, as a routine a tail call jumps to does.
 
-    Code that takes its return address off the stack - a ``pop`` or ``ex
-    (sp),rr`` where nothing of its own is pushed - may put another in its
-    place, or none (``pop hl / push de / ret``, ``ex (sp),hl / ret``).  Its
-    ``ret`` goes anywhere: ``wild`` is set for all the code that can be
-    reached from where it was entered.  (Where the height is not known, a
-    ``ret`` goes anywhere anyway.)  Such a routine, and one with a ``ret``
-    where the height is not known, may come back to its call with the stack
-    as it pleases: they are ``irregular``, and the height after a call of
-    one is not known.
+    A routine that comes back that way from every ``ret`` at the same
+    height is *regular*, and that height is what a call of it does to the
+    stack: 0 as a rule, -1 for one that takes an argument its caller pushed
+    off the stack (PL/M-80's convention: ``pop hl / ex (sp),hl``).  It may
+    take off, or swap, the words the call finds between that height and its
+    return address - its arguments - but none further up, which are its
+    caller's; one that does (``SWAP: pop hl / pop de / ld de,THERE / push
+    de / push hl / ret``) may leave its caller's return address changed, as
+    may one whose height is not known where it pops, and is not regular.
+    Nor is one that goes where it cannot be followed, or that comes back
+    from a ``ret`` that does not take its return address, or at heights
+    that do not agree, or not known.  The height after a call of a
+    routine that is not regular is not known, and nor is where the
+    caller's return address is.  What a routine does to the stack depends
+    on what the routines it calls do, and theirs on it where they recurse:
+    each is first taken to be regular and to leave the stack as it found
+    it, and the rounds are repeated until what each does is what the
+    others were taken to find.  A routine whose summary still changes
+    after a few rounds is taken to be not regular.
+
+    A routine that takes anything off the stack from its return address
+    up, or swaps it, looks at what a tail call changes: jumped to, it finds
+    its caller's return address where its own was, and what its caller's
+    caller pushed where its arguments were.  So does one that calls a
+    routine that takes more arguments than it pushed for it, and so reaches
+    its return address, and one that leaves the stack other than it found
+    it: it ``peeks``.  (One that only calls a routine that peeks does not:
+    what that routine finds is the same whether its caller was called or
+    jumped to.)
 
     Where the text makes a pointer from SP anywhere (``ld hl,0 / add
     hl,sp``, ``ld (nn),sp``), the pointer may be kept or passed on, and
     code that writes through a pointer, or calls code that does, may write
-    another return address over its own (``ld (hl),e``): it is wild too,
-    though it comes back as high on the stack as it went.  Code that makes
-    such a pointer, or reads through a pointer (which its caller may have
-    made before the call), or calls code that does either, may read its
-    return address or what is above it, which a tail call changes: it
-    ``peeks``.  So does code that calls an irregular routine, which may
-    have read or moved the word above its own return address: its
-    caller's.  (A caller that then returns is irregular itself; one that
-    leaves by a jump is not.)  A pointer into the stack is taken to come
-    from this text, or from a module that calls it, which does not reach
-    below the SP it calls with - not from a module this text calls, which
-    hands none back, and reads nothing above its own return address
-    through one it is handed.
+    another return address over its own (``ld (hl),e``): it is ``wild``,
+    and its ``ret`` goes anywhere, though it comes back as high on the
+    stack as it went.  Code that makes such a pointer, or reads through a
+    pointer (which its caller may have made before the call), or calls
+    code that does either, may read its return address or what is above
+    it, which a tail call changes: it peeks.  A pointer into the stack is
+    taken to come from this text, or from a module that calls it, which
+    does not reach below the SP it calls with - not from a module this text
+    calls, which hands none back, and reads nothing above its own return
+    address through one it is handed.
 
     Code that goes on where it cannot be followed may run any code, this
     text's or another's: ``jp (hl)``, ``jp (ix)``, ``jp (iy)``, a ``ret``
-    to what it pushed (``push hl / ret``), ``reti``, ``retn``, ``halt``,
-    data, a directive or an instruction not recognised, and a jump or call
-    to an address of this text that is not one of its labels as written
-    (``jp ALIAS`` where ``ALIAS equ RTN``, ``call rtn``, ``jp $+3``: see
-    :meth:`_Code.unfollowed`).  That code may take its caller's return
-    address off the stack, or change it through a pointer, so the routine
-    is irregular; and it may read above its return address, so it peeks.
-    ``$`` there is an address on either side of the instruction, and the
-    line after it is taken to be entered from anywhere, as a label that
-    something names is.
+    that does not take the return address (``push hl / ret``), ``reti``,
+    ``retn``, ``halt``, data, a directive or an instruction not recognised,
+    and a jump or call to an address of this text that is not one of its
+    labels as written (``jp ALIAS`` where ``ALIAS equ RTN``, ``call rtn``,
+    ``jp $+3``: see :meth:`_Code.unfollowed`).  That code may take its
+    caller's return address off the stack, or change it through a pointer,
+    so the routine is not regular; and it may read above its return
+    address, so it peeks.  The code it goes to is entered from anywhere, as
+    a label that something names is.
 
-    Where code goes on like that with something of its own on the stack -
-    a height above 0 or not known, or above 1 at a ``ret`` to what it
-    pushed (``push bc / ld hl,HND / jp (hl)``, ``push bc / push hl /
-    ret``) - the code it goes to finds that on the stack, where the
-    height counted from its label, 0, says nothing is.  It may be any code
-    entered from anywhere: where the text has such a jump, ``enters_pushed``
-    is set, and :meth:`pushed` holds for all of that code.  (A ``ret``
-    where the height is not known, and one from code that may have moved
-    its return address, are taken to go back to a call: see Known
-    issues.)
+    Where code goes on like that with something on the stack other than the
+    return address it was entered with - where that is not at the top of
+    the stack, or, at a ``ret`` that may not take it, not right under the
+    word the ``ret`` takes (``push bc / ld hl,HND / jp (hl)``, ``push bc /
+    push hl / ret``, ``ex (sp),hl / ret``, a ``ret`` of a routine that may
+    have written over its return address, or where the height is not
+    known) - the code it goes to finds that on the stack, where the height
+    counted from its label, 0, says nothing is.  So it is with a jump out
+    of the text where the return address is not at the top of the stack
+    (``push bc / push hl / jp EXT``): the code there returns to what is.
+    The code it goes to may be any code entered from anywhere: where the
+    text has such a jump, ``enters_pushed`` is set, and :meth:`pushed`
+    holds for all of that code.  (Not a jump out of the text where the
+    height is not known, as after ``ld sp,hl / call MAIN / jp 0``: see
+    Known issues.)
     """
 
     def __init__(self, code: "_Code"):
@@ -330,7 +369,7 @@ class _Routines:
 
         self.open = [False] * (n + 1)
         self.entries: list[set[int]] = [set() for _ in range(n + 1)]
-        roots = sorted(open_roots | set(self.calls))
+        roots = sorted(r for r in open_roots | set(self.calls) if r < n)
         reach: dict[int, set[int]] = {}
         for root in roots:
             is_open = root in open_roots
@@ -348,19 +387,18 @@ class _Routines:
                 stack.extend(successors(i))
             reach[root] = reached
 
-        # The lines each question below is about, and those of each routine:
-        # the heights change from round to round of the loop below, and the
-        # lines do not.
+        # What each line does to the stack and the return address, which
+        # does not change from round to round below; and the lines each
+        # question below is about.
         #   Lines that go on where they cannot be followed (see the
         #   docstring), whatever the height: data, a directive, `jp (hl)',
         #   a jump or call to an address of this text not followed.
         gone: set[int] = set()
-        #   Returns: at a height other than 0 they go where they cannot be
-        #   followed, or anywhere.
-        returns: set[int] = set()
-        #   Lines that take the return address (or what is under it) off
-        #   the stack at a height of 0 or less: a pop, or `ex (sp),rr'.
-        movers: set[int] = set()
+        #   Returns, and jumps out of the text: what they go to returns (or
+        #   not) to what is at the top of the stack.
+        exits: set[int] = set()
+        self._kind: list[tuple] = [()] * (n + 1)
+        stack_ops: set[int] = set()
         calls: set[int] = set()
         for i, eff in enumerate(effects):
             if eff is None:
@@ -368,153 +406,299 @@ class _Routines:
             if eff.flow in ("stop", "data"):
                 gone.add(i)
             elif eff.flow == "return":
-                returns.add(i)
+                exits.add(i)
             elif eff.flow in ("jump", "branch", "call") and eff.target is not None and \
                     code.unfollowed(eff.target):
                 gone.add(i)
+            elif eff.flow in ("jump", "branch") and eff.target is not None and \
+                    code.target(eff.target) is None:
+                exits.add(i)
             if eff.flow == "call":
                 calls.add(i)
-            if eff.flow == "next" and "sp" in eff.reads and \
-                    (eff.stack == -1 or (eff.stack == 0 and _split(code.lines[i])[1] == "ex")):
-                movers.add(i)
+                t = code.target(eff.target)
+                if t is not None:
+                    self._kind[i] = ("call", t)
+                    stack_ops.add(i)
+                elif eff.target is not None and code.unfollowed(eff.target):
+                    self._kind[i] = ("lost",)
+                else:
+                    self._kind[i] = ("out",)
+            elif eff.stack is None:
+                self._kind[i] = ("lost",)
+            elif eff.stack == 1 and eff.pair:
+                self._kind[i] = ("push", eff.pair)
+            elif eff.stack == -1 and eff.pair:
+                self._kind[i] = ("pop", eff.pair)
+                stack_ops.add(i)
+            elif eff.swap_de_hl:
+                self._kind[i] = ("swap",)
+            elif eff.flow == "next" and "sp" in eff.reads and _split(code.lines[i])[1] == "ex":
+                self._kind[i] = ("xsp", split_operands(_split(code.lines[i])[2])[1].lower())
+                stack_ops.add(i)
+            elif eff.writes:
+                self._kind[i] = ("writes", frozenset(p for p in _KEEPERS
+                                                     if _PAIRS[p] & eff.writes))
         goes = {root for root in roots if not gone.isdisjoint(reach[root])}
-        root_returns = {root: reach[root] & returns for root in roots}
-        root_movers = {root: reach[root] & movers for root in roots}
-
-        # Routines that move their return address, return at a height not
-        # known or go where they cannot be followed, and the heights, which
-        # are unknown after a call of one: each can make more of the other.
-        unbalanced: set[int] = set()
+        root_exits = {root: sorted(reach[root] & exits) for root in roots}
+        root_ops = {root: sorted(reach[root] & stack_ops) for root in roots}
         callees = set(self.calls)
-        height: list = [_UNSET] * (n + 1)
-        starts = [root for root in roots if root < n]
-        for root in starts:
-            height[root] = 0
-        while True:
-            self._heights(code, successors, unbalanced, height, starts)
-            wild = {root for root in roots
-                    if any(type(height[i]) is int and height[i] <= 0 for i in root_movers[root])}
-            # A return at a height not known, or at one other than 0, which
-            # goes where it cannot be followed.
-            irregular = wild | goes | {root for root in roots
-                                       if any(height[i] != 0 for i in root_returns[root])}
-            more = (irregular & callees) - unbalanced
-            if not more:
+
+        # What a call of each routine does, as far as the caller can tell:
+        # (the height it leaves, the lowest position it reaches or None), or
+        # None where it is not regular.
+        def judge(root: int, height: list, places: list, summary: dict
+                  ) -> tuple[int, int | None] | None:
+            if root in goes:
+                return None
+            low = self._lowest(root_ops[root], height, summary)
+            if low is _ANY:
+                return None
+            delta = None
+            for e in root_exits[root]:
+                h = height[e]
+                if h is None or h not in places[e] or (delta is not None and h != delta):
+                    return None
+                delta = h
+            delta = delta or 0
+            if low is not None and low < min(0, delta):  # type: ignore[operator]
+                return None  # it reaches its caller's words
+            return delta, low  # type: ignore[return-value]
+
+        # First what each routine that is regular does: each is taken to be
+        # regular and to leave the stack as it found it, and then to do what
+        # it is found to do where it is found regular, until that is what it
+        # does.  One whose summary still changes after a few rounds is not
+        # regular.
+        summary: dict[int, tuple[int, int | None] | None] = {t: (0, None) for t in callees}
+        for _ in range(_FREE_ROUNDS):
+            height, places = self._flow(code, successors, summary, roots)
+            new = {}
+            for t in callees:
+                got = judge(t, height, places, summary)
+                new[t] = summary[t] if got is None else got
+            if new == summary:
                 break
-            unbalanced |= more
-            # The height after a call of one of these is not known now; the
-            # rest stays as it is.
-            starts = [c - 1 for t in more for c in self.calls[t] if height[c - 1] is not _UNSET]
-        height = [None if h is _UNSET else h for h in height]
-        self.height: list[int | None] = height
+            summary = new
+        else:
+            height, places = self._flow(code, successors, summary, roots)
+            summary = {t: s if judge(t, height, places, summary) == s else None
+                       for t, s in summary.items()}
+        # Then which are not regular: after a call of one, the height is not
+        # known, which can make more of them so.
+        changed = [t for t, s in summary.items() if s is None]
+        while True:
+            if changed:
+                height, places = self._flow(code, successors, summary, roots, height, places,
+                                            [c - 1 for t in changed for c in self.calls[t]])
+            found = {root: judge(root, height, places, summary) for root in roots}
+            changed = [t for t in callees if summary[t] is not None and found[t] is None]
+            if not changed:
+                break
+            for t in changed:
+                summary[t] = None
+        irregular = {root for root, got in found.items() if got is None}
+        found = {root: got for root, got in found.items() if got is not None}
+        self.height: list[int | None] = [None if h is _UNSET else h for h in height]
+        self.places = places
         self.irregular = irregular
+        self.summary = summary
 
         # Pointers made from SP: code that makes one peeks.  Where the text
         # makes one anywhere, code that reads through a pointer, which its
         # caller may have made, peeks too, and code that writes through one
-        # is wild.  Code that goes where it cannot be followed peeks: it is
-        # irregular.  Code that calls code that peeks, or is wild, is so too.
-        callees = {root: {code.target(effects[i].target) for i in reach[root] & calls}
-                   for root in roots}
+        # is wild.  Code that calls code that peeks, or is wild, is so too.
+        # A routine that is not regular, or reaches its return address, or
+        # leaves the stack other than it found it, peeks.
+        callees_of = {root: {code.target(effects[i].target) for i in reach[root] & calls}
+                      for root in roots}
 
         def closed_over_calls(found: set[int]) -> set[int]:
             grew = True
             while grew:
                 grew = False
                 for root in roots:
-                    if root not in found and callees[root] & found:
+                    if root not in found and callees_of[root] & found:
                         found.add(root)
                         grew = True
             return found
 
-        # An irregular routine may read or move what is above its return
-        # address, which is its caller's (`SWAP: pop hl / pop de / ld
-        # de,THERE / push de / push hl / ret'): a caller that returns after
-        # the call is irregular itself, and one that leaves otherwise
-        # (`call SWAP / jp EXT') peeks.
         peeking = {i for i in range(n)
                    if code.stack_pointers[i] or (code.stack_pointer and code.pointer_reads[i])}
         self.peeks = closed_over_calls(
-            {root for root in roots if not peeking.isdisjoint(reach[root])} | set(irregular))
+            {root for root in roots if not peeking.isdisjoint(reach[root])}) | set(irregular) | \
+            {root for root, (delta, low) in found.items() if delta != 0 or
+             (low is not None and low <= 0)}
         writes: set[int] = set()
         if code.stack_pointer:
             writing = {i for i in range(n) if code.pointer_writes[i]}
             writes = closed_over_calls(
                 {root for root in roots if not writing.isdisjoint(reach[root])})
         self.wild = [False] * (n + 1)
-        for root in wild | writes:
+        for root in writes:
             for i in reach[root]:
                 self.wild[i] = True
 
-        # Code that goes where it cannot be followed with something of its
-        # own on the stack (see the docstring).
+        # Code that goes where it cannot be followed with something on the
+        # stack other than its return address (see the docstring).
         def goes_pushed(i: int) -> bool:
             eff = effects[i]
             if eff is None or not (self.open[i] or self.entries[i]):
                 return False
-            h = height[i]
+            h = self.height[i]
             if eff.flow == "return" or (eff.flow == "stop" and _split(code.lines[i])[1] in
                                         ("reti", "retn")):
-                return h is not None and h > 1  # it takes one word, where it goes
+                if self.returns(i):
+                    return False
+                return h is None or h - 1 not in places[i]  # it takes one word
+            if i in exits:
+                # What it goes to returns to what is at the top of the stack.
+                # (Where the height is not known, as after `ld sp,hl', that
+                # is taken to be its return address: see Known issues.)
+                return h is not None and not self.returns(i) and h - 1 not in places[i]
             if eff.flow in ("stop", "data") or (
                     eff.flow in ("jump", "branch") and eff.target is not None and
                     code.unfollowed(eff.target)):
-                return h is None or h > 0
+                return h is None or h not in places[i]
             return False
 
         self.enters_pushed = any(goes_pushed(i) for i in range(n))
 
-    @staticmethod
-    def _heights(code: "_Code", successors: Callable[[int], list[int]], unbalanced: set[int],
-                 height: list, work: list[int]) -> None:
-        """Stack heights: 0 where a routine (or anything else) is entered,
-        None where they are not known (two ways in disagree, or after a call
-        of an ``unbalanced`` routine), _UNSET where nothing reaches.
+    def _lowest(self, ops: list[int], height: list, summary: dict) -> object:
+        """The lowest position on the stack that the lines ``ops`` take
+        something from or swap, directly or through a call; None if none
+        is 0 or less (none reaches the return address), _ANY if one is
+        not known."""
+        low = None
+        kind = self._kind
+        for i in ops:
+            h = height[i]
+            if h is _UNSET:
+                continue
+            k = kind[i]
+            if k[0] == "call":
+                s = summary.get(k[1])
+                if s is None:
+                    return _ANY
+                if s[1] is None:
+                    continue
+                if h is None:
+                    return _ANY
+                at = h + 1 + s[1]
+            else:
+                if h is None:
+                    return _ANY
+                at = h
+            if at <= 0 and (low is None or at < low):
+                low = at
+        return low
 
-        ``height`` is brought up to date from the lines in ``work`` on: the
-        roots, or calls of routines found unbalanced since it was.  As more
-        are, a height can only become not known, so the rest stand."""
+    def _flow(self, code: "_Code", successors: Callable[[int], list[int]], summary: dict,
+              roots: list[int], height: list | None = None, places: list | None = None,
+              work: list[int] | None = None) -> tuple[list, list]:
+        """Heights, and where the return address is, at each line: 0 and at
+        0 where a routine (or anything else) is entered; None and nowhere
+        where two ways in disagree about the height, or after a call of a
+        routine that is not regular; _UNSET where nothing reaches.  Where
+        two ways agree about the height, the return address is where both
+        have it."""
         effects = code.effects
+        kind = self._kind
         n = len(effects)
         unset = _UNSET
-        work = list(work)
+        if height is None or places is None or work is None:
+            height = [unset] * (n + 1)
+            places = [_NOWHERE] * (n + 1)
+            start = frozenset({0})
+            for root in roots:
+                height[root] = 0
+                places[root] = start
+            work = list(roots)
+        else:
+            work = [i for i in work if height[i] is not unset]
         while work:
             i = work.pop()
             h = height[i]
-            eff = effects[i]
-            if h is None or eff is None:
+            here = places[i]
+            k = kind[i]
+            if h is None or not k:
+                after, there = h, here
+            elif k[0] == "call":
+                s = summary.get(k[1])
+                if s is None or (s[0] and effects[i].cond):
+                    after, there = None, _NOWHERE
+                else:
+                    after = h + s[0]
+                    top = h + min(s[0], 0)
+                    there = frozenset(p for p in here if type(p) is int and p <= top)
+            elif k[0] == "out":
+                after, there = h, frozenset(p for p in here if type(p) is int)
+            elif k[0] == "lost":
+                after, there = None, _NOWHERE
+            elif k[0] == "push":
+                after = h + 1
+                there = here - {after}
+                if k[1] in here:
+                    there = there | {after}
+            elif k[0] == "pop":
+                after = h - 1
+                there = here - {h, k[1]}
+                if h in here and k[1] in _KEEPERS:
+                    there = there | {k[1]}
+            elif k[0] == "xsp":
                 after = h
-            elif eff.stack is None:
-                after = None
-            elif eff.flow == "call" and code.target(eff.target) in unbalanced:
-                after = None
-            else:
-                after = h + eff.stack
+                there = here - {h, k[1]}
+                if h in here:
+                    there = there | {k[1]}
+                if k[1] in here:
+                    there = there | {h}
+            elif k[0] == "swap":
+                after = h
+                there = frozenset({"de": "hl", "hl": "de"}.get(p, p) if type(p) is str else p
+                                  for p in here)
+            else:  # writes
+                after = h
+                there = here - k[1] if here else here
             for j in successors(i):
                 if j >= n:
                     continue
                 old = height[j]
                 if old is unset:
                     height[j] = after
-                elif old is None or old == after:
+                    places[j] = there if after is not None else _NOWHERE
+                elif old is None:
                     continue
-                else:
+                elif old != after:
                     height[j] = None  # two ways in disagree
+                    places[j] = _NOWHERE
+                else:
+                    both = places[j] & there
+                    if both == places[j]:
+                        continue
+                    places[j] = both
                 work.append(j)
+        return height, places
+
+    def returns(self, i: int) -> bool:
+        """Does the ``ret`` (or jump out of the text) at line ``i`` take the
+        return address its code was entered with: is that at the top of
+        the stack, and may nothing have written over it?"""
+        h = self.height[i]
+        return h is not None and h in self.places[i] and not self.wild[i]
 
     def pushed(self, i: int) -> bool:
-        """May the stack hold more at line ``i`` than where its routine was
-        entered: is the height there other than 0, or not known?  Or, where
-        code goes where it cannot be followed with something pushed, may
-        line ``i`` be entered from anywhere?  (Not at a line nothing
-        reaches.)"""
+        """May the stack hold other than the return address at its top at
+        line ``i``, as a ``ret`` there would take it: is the height not
+        known, or has the address been moved, or may it have been written
+        over?  Or, where code goes where it cannot be followed with
+        something pushed, may line ``i`` be entered from anywhere?  (Not at
+        a line nothing reaches.)"""
         if not (self.open[i] or self.entries[i]):
             return False
-        return self.height[i] != 0 or (self.open[i] and self.enters_pushed)
+        return not self.returns(i) or (self.open[i] and self.enters_pushed)
 
     def continuations(self, i: int) -> list[int] | None:
         """The lines a ``ret`` at line ``i`` may return to, or None if any."""
-        if self.open[i] or self.wild[i] or not self.entries[i]:
+        if self.open[i] or not self.entries[i] or not self.returns(i):
             return None
         out: list[int] = []
         for root in self.entries[i]:
@@ -750,7 +934,7 @@ class _Code:
                 if eff.flow == "return":
                     if eff.cond:
                         work.append((i + 1, need, frames))
-                    if h != 0 or routines.wild[i]:
+                    if not routines.returns(i):
                         return True
                     # This routine's slots are below SP now.
                     need = frozenset(x for x in need if not (type(x) is tuple and x[0] == depth))
@@ -1844,8 +2028,7 @@ class PeepholeOptimizer:
                 if pattern.name == "tail_call":
                     r = code.routines
                     at = instruction_lines[0]
-                    if code.moves_return(instrs[0][1]) or r.pushed(at) or \
-                            (r.wild[at] and (r.open[at] or bool(r.entries[at]))):
+                    if code.moves_return(instrs[0][1]) or r.pushed(at):
                         continue
                 # A store through a register may land in the slot the push
                 # fills, where the text makes a pointer from SP, and change
