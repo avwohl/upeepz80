@@ -537,3 +537,46 @@ def test_a_table_whose_target_reads_the_entry_through_de_is_not_threaded(read):
            "\tld hl,0\n\tld de,0\n\tret\n")
     out = assert_equivalent(src, ignore=range(DATA_BASE, DATA_BASE + 4))
     assert "dw C0" in instrs(out), out
+
+
+# ---- A jump whose operand an address computed from a label reaches ------------
+#
+# z80sim does not put the bytes of code in memory, so these look at the code:
+# on um80, ul80 and cpmemu each program prints something else once optimized.
+
+VEC = ("VEC:\n\tjp HANDLER\nHANDLER:\n\tjp REAL\nOTHER:\n\tld a,1\n\tret\nREAL:\n\tld a,2\n\tret\n"
+       "MINE:\n\tld a,3\n\tret\n")
+
+
+@pytest.mark.parametrize("src", [
+    # the operand compared with HANDLER
+    "\tld hl,(VEC+1)\n\tld de,HANDLER\n\tor a\n\tsbc hl,de\n\tld (W),hl\n\tcall VEC\n\tret\n",
+    # kept, and the vector chained to MINE, which goes on to what it held
+    "\tld hl,(VEC+1)\n\tld (W),hl\n\tld hl,CHAIN\n\tld (VEC+1),hl\n\tcall VEC\n\tret\n"
+    "CHAIN:\n\tld hl,(W)\n\tjp (hl)\n",
+])
+def test_a_jump_whose_operand_is_read_keeps_it(src):
+    """`ld hl,(VEC+1)' reads the operand of `jp HANDLER', and HANDLER is
+    `jp REAL': jump threading made VEC `jp REAL', and the program read REAL
+    where it had read HANDLER."""
+    out = optimize(src + VEC)
+    assert "jp HANDLER" in instrs(out), out
+
+
+@pytest.mark.parametrize("go", [
+    "GO:\n\tjp VEC\n",
+    "GO:\n\tjr VEC\n",
+    # a tail call, `jp VEC'
+    "GO:\n\tcall VEC\n\tret\n",
+])
+@pytest.mark.parametrize("patch", [
+    "\tld hl,MINE\n\tld (VEC+1),hl\n",
+    "\tld hl,VEC+1\n\tld de,MINE\n\tld (hl),e\n\tinc hl\n\tld (hl),d\n",
+])
+def test_no_jump_is_threaded_through_a_jump_the_program_patches(patch, go):
+    """The program writes MINE over VEC's operand: VEC goes to MINE, and
+    so does GO.  Jump threading took VEC to go on to REAL, through
+    HANDLER, and made GO's jump `jp REAL'."""
+    src = patch + "\tcall GO\n\tld (V),a\n\tjp 0\n" + go + "\tnop\n" + VEC
+    out = optimize(src)
+    assert [line for line in instrs(out) if line in ("jp VEC", "jr VEC")], out

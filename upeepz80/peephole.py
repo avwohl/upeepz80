@@ -809,7 +809,7 @@ class _Code:
             {name.lower() for name in seen_equ} - numbers
         self._layout: tuple[list[int], list[int], list[int]] | None = None
         self._routines: _Routines | None = None
-        self._offsets: tuple[set[int], set[int]] | None = None
+        self._offsets: tuple[set[int], set[int], set[int]] | None = None
         self._unfollowed: dict[str, bool] = {}
 
     def target(self, name: str | None) -> int | None:
@@ -851,7 +851,12 @@ class _Code:
         """Lines that no rewrite may change or remove."""
         return self._offsets_found()[1]
 
-    def _offsets_found(self) -> tuple[set[int], set[int]]:
+    @property
+    def patched(self) -> set[int]:
+        """Lines whose bytes the program may read or write, as data."""
+        return self._offsets_found()[2]
+
+    def _offsets_found(self) -> tuple[set[int], set[int], set[int]]:
         """The code an address computed from a label may reach.
 
         A program that computes an address from a label - ``ld hl,LL+3``,
@@ -863,32 +868,39 @@ class _Code:
         change or remove them.  And the line at the address, where one
         starts there, may be entered from anywhere, as a label something
         names may: it is one of the ``offset_entries``.  (A label named as
-        it is, ``ld hl,L``, is itself where it points.)
+        it is, ``ld hl,L``, is itself where it points.)  At an address that
+        is not only jumped to, the program may read or write a byte or a
+        word: the lines with a byte there are ``patched``.  Where a jump
+        among them goes is not known, as the program may write another
+        address over its operand (``ld (VEC+1),hl``).
 
         Another module can compute such an address too, from a label the
         text exports.  What it does with one is not known; the vector of
         ``jp`` instructions that a BIOS exports its first label of, and
         that other modules enter at BIOS+3, BIOS+6..., is the pattern: an
         exported label that ``jp`` instructions follow.  Each of them is
-        frozen, and each may be entered from anywhere.
+        frozen and patched (a program may patch a BIOS's vector), and each
+        may be entered from anywhere.
 
         Sizes are the optimizer's own (:meth:`layout`).  Where the address
         cannot be worked out - an expression other than NAME+N or NAME-N,
         a size not known between - every line of the label's run of code
-        of known size is frozen and may be entered from anywhere.  From a
-        label of data, an address is taken to stay in the data it labels,
-        or to point where that data ends (see :class:`_Storage`), after
-        which code is taken to be entered from anywhere anyway."""
+        of known size is frozen and patched, and may be entered from
+        anywhere.  From a label of data, an address is taken to stay in the
+        data it labels, or to point where that data ends (see
+        :class:`_Storage`), after which code is taken to be entered from
+        anywhere anyway."""
         if self._offsets is not None:
             return self._offsets
         entries: set[int] = set()
         frozen: set[int] = set()
-        self._offsets = (entries, frozen)
+        patched: set[int] = set()
+        self._offsets = (entries, frozen, patched)
         n = len(self.lines)
         effects = self.effects
         labels = {name.lower(): idx for name, idx in self.label_lines
                   if self.labels.get(name) is not None}
-        self._vectors(labels, entries, frozen)
+        self._vectors(labels, entries, frozen, patched)
         known: dict[int, bool] = {}
 
         def code_at(j: int) -> bool:
@@ -970,6 +982,8 @@ class _Code:
                 if addr[j] + size[j] > lo and effects[j] is not None and \
                         effects[j].flow != "data":
                     frozen.add(j)
+                    if kind != "goto" and addr[j] < a + 2 and addr[j] + size[j] > a:
+                        patched.add(j)
             if kind != "load" and (s, a) in first:
                 entries.add(first[(s, a)])
 
@@ -978,6 +992,7 @@ class _Code:
             for _, j in runs.get(seg[b], []):
                 if effects[j] is not None and effects[j].flow != "data":
                     frozen.add(j)
+                    patched.add(j)
                     entries.add(j)
 
         done: set[tuple[str, int, str]] = set()
@@ -1000,7 +1015,8 @@ class _Code:
                     everything(b)
         return self._offsets
 
-    def _vectors(self, labels: dict[str, int], entries: set[int], frozen: set[int]) -> None:
+    def _vectors(self, labels: dict[str, int], entries: set[int], frozen: set[int],
+                 patched: set[int]) -> None:
         """The ``jp`` instructions after a label the text exports: a vector
         of jumps another module may enter at an offset (_offsets_found)."""
         effects = self.effects
@@ -1016,6 +1032,7 @@ class _Code:
                         eff.target is None:
                     break
                 frozen.add(j)
+                patched.add(j)
                 entries.add(j)
 
     def live(self, starts: list[int], resources: frozenset[str] | set[str]) -> bool:
@@ -2574,8 +2591,11 @@ class PeepholeOptimizer:
         """
         changed = False
         code = _Code(lines)
+        patched = code.patched
 
-        # Build map of label -> (line index, first instruction at or after it)
+        # Build map of label -> (line index, first instruction at or after it).
+        # A jump whose operand the program may change goes nowhere known,
+        # and is not threaded through.
         label_info: dict[str, tuple[int, Instr | None]] = {}
         for i, line in enumerate(lines):
             if self._is_label_line(line):
@@ -2585,7 +2605,7 @@ class PeepholeOptimizer:
                 first_instr: Instr | None = None
                 if op is not None:
                     # An instruction on the label's own line comes first.
-                    first_instr = self._parse_line(line)
+                    first_instr = None if i in patched else self._parse_line(line)
                 else:
                     for j in range(i + 1, len(lines)):
                         next_line = lines[j].strip()
@@ -2593,7 +2613,7 @@ class PeepholeOptimizer:
                             continue
                         if self._is_label_line(lines[j]):
                             break
-                        first_instr = self._parse_line(lines[j])
+                        first_instr = None if j in patched else self._parse_line(lines[j])
                         break
                 label_info[label] = (i, first_instr)
 
@@ -2620,13 +2640,14 @@ class PeepholeOptimizer:
             if target != label:
                 label_target[label] = target
 
-        # Rewrite jumps to use final destinations
+        # Rewrite jumps to use final destinations, but for one that an
+        # address computed from a label depends on.
         result: list[str] = []
         named_at: dict[str, list[int]] = {}
         for i, line in enumerate(lines):
             parsed = None if self._is_label_line(line) else self._parse_line(line)
             if parsed and parsed[0] in ("jp", "jr") and "," not in parsed[1] and \
-                    parsed[1].strip() in label_target:
+                    parsed[1].strip() in label_target and i not in code.frozen:
                 new_target = label_target[parsed[1].strip()]
                 if parsed[0] == "jp":
                     result.append(f"\tjp {new_target}")
