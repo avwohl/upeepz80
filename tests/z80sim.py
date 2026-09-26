@@ -10,10 +10,13 @@ and should be masked off when comparing.
 Symbols name addresses: pass ``symbols={"V0": 0x8000, ...}``.  ``equ`` lines
 in the source are honoured.  The data the source defines (``ds``, ``db``,
 ``dw``) is laid out from DATA_BASE on as an assembler lays it out, one line
-after another; a label of code is only its line.  A ``call`` to a label in
-the source pushes a return address and goes there; a ``ret`` with nothing
-of ours on the stack ends the run, as do ``halt``, ``jp 0`` and running off
-the end.
+after another.  The instructions are laid out from CODE_BASE on, each as
+long as the Z80's encoding of it, so that an address computed from a label
+of code (``BIOS+3``, ``$+3``) is where the assembler puts that byte; data
+takes no room among them.  A ``call`` to a label in the source pushes a
+return address and goes there; a ``ret`` with nothing of ours on the stack
+ends the run, as do ``halt``, ``jp 0`` and running off the end.  A jump or
+return to an address that is not where an instruction starts is an error.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from upeepz80.z80 import parse_number, split_operands, strip_comment  # noqa: E402
 
-CODE_BASE = 0x1000  # pseudo address of line 0; return addresses are CODE_BASE + line
+CODE_BASE = 0x1000  # where the first instruction is
 DATA_BASE = 0xA000  # where the data the text defines (ds, db, dw) is laid out
 SENTINEL = 0x0FFE  # the return address the run starts with
 
@@ -102,6 +105,96 @@ def _data_size(op: str, ops: list[str]) -> int:
                for item in ops)
 
 
+# How long each instruction is, as the Z80 encodes it: modelled here apart
+# from the optimizer's own sizes (upeepz80.z80's effect), as data is.
+
+_R8 = frozenset(R8)
+_ALU = ("add", "adc", "sub", "sbc", "and", "or", "xor", "cp")
+_ONE_BYTE = frozenset({"nop", "halt", "di", "ei", "daa", "cpl", "ccf", "scf", "rlca", "rrca",
+                       "rla", "rra", "exx"})
+_TWO_BYTES = frozenset({"neg", "reti", "retn", "rld", "rrd", "im", "ldi", "ldir", "ldd", "lddr",
+                        "cpi", "cpir", "cpd", "cpdr", "ini", "inir", "ind", "indr", "outi",
+                        "otir", "outd", "otdr", "in", "out", "jr", "djnz"})
+_SHIFTS = ("rlc", "rrc", "rl", "rr", "sla", "sra", "srl", "sll", "sl1")
+
+
+def _indexed(o: str) -> bool:
+    return o.startswith(("(ix", "(iy")) and o.endswith(")")
+
+
+def _memory(o: str) -> bool:
+    return o.startswith("(") and o.endswith(")")
+
+
+def code_size(op: str, ops: list[str]) -> int | None:  # noqa: C901 - one table
+    """Bytes the Z80 encodes ``op ops`` in, or None where this does not know."""
+    lo = [o.replace(" ", "").lower() for o in ops]
+    n = len(lo)
+    if op in _ONE_BYTE and n == 0:
+        return 1
+    if op in _TWO_BYTES:
+        return 2
+    if op in ("ret", "rst"):
+        return 1
+    if op == "jp":
+        if n == 1 and lo[0] == "(hl)":
+            return 1
+        return 2 if n == 1 and lo[0] in ("(ix)", "(iy)") else 3
+    if op == "call":
+        return 3
+    if op in ("push", "pop") and n == 1:
+        return 2 if lo[0] in ("ix", "iy") else 1
+    if op == "ex" and n == 2:
+        if lo in (["de", "hl"], ["af", "af'"], ["(sp)", "hl"]):
+            return 1
+        return 2 if lo[0] == "(sp)" else None
+    if op in ("inc", "dec") and n == 1:
+        o = lo[0]
+        if o in _R8 or o in ("(hl)", "bc", "de", "hl", "sp"):
+            return 1
+        if o in ("ix", "iy"):
+            return 2
+        return 3 if _indexed(o) else None
+    if op in _ALU:
+        if n == 2 and lo[0] == "hl":
+            return 1 if op == "add" else 2
+        if n == 2 and lo[0] in ("ix", "iy"):
+            return 2
+        src = lo[-1]
+        if src in _R8 or src == "(hl)":
+            return 1
+        return 3 if _indexed(src) else 2
+    if op in _SHIFTS and n == 1:
+        return 4 if _indexed(lo[0]) else 2
+    if op in ("bit", "set", "res") and n == 2:
+        return 4 if _indexed(lo[1]) else 2
+    if op == "ld" and n == 2:
+        d, s = lo
+        if (d in _R8 or d == "(hl)") and (s in _R8 or s == "(hl)"):
+            return 1
+        if _indexed(d) or _indexed(s):
+            return 4 if _indexed(d) and s not in _R8 else 3
+        if d == "(hl)":
+            return 2
+        if (d == "a" and s in ("(bc)", "(de)")) or (s == "a" and d in ("(bc)", "(de)")):
+            return 1
+        if (d, s) in (("a", "i"), ("a", "r"), ("i", "a"), ("r", "a")):
+            return 2
+        if d == "sp" and s in ("hl", "ix", "iy"):
+            return 1 if s == "hl" else 2
+        if d in _R8:
+            return 3 if _memory(s) else 2
+        if s == "a" and _memory(d):
+            return 3
+        if d in ("bc", "de", "hl", "sp"):
+            return 3 if not _memory(s) or d == "hl" else 4
+        if d in ("ix", "iy"):
+            return 4
+        if _memory(d) and s in ("bc", "de", "hl", "sp", "ix", "iy"):
+            return 3 if s == "hl" else 4
+    return None
+
+
 class Machine:
     def __init__(self, source: str, symbols: dict[str, int] | None = None):
         self.lines: list[tuple[str, list[str]] | None] = []
@@ -145,6 +238,7 @@ class Machine:
                     raise SimError(f"label {label} defined twice")
                 self.labels[label.lower()] = idx
         self._lay_out_data()
+        self._lay_out_code()
         for name, expr in equates:
             self.symbols[name] = self.eval(expr)
         self.mem = bytearray(0x10000)
@@ -187,6 +281,43 @@ class Machine:
                 top += size
             pending = []
 
+    def _lay_out_code(self) -> None:
+        """Give each line of code its address, as an assembler would: the
+        instructions one after another from CODE_BASE on, each as long as
+        :func:`code_size` says.  A line that is not an instruction is where
+        the next one is.  After an instruction whose size is not known, no
+        address is."""
+        self.line_address: list[int | None] = []
+        a: int | None = CODE_BASE
+        for ins in self.lines:
+            self.line_address.append(a)
+            if a is None or ins is None or ins[0] in DIRECTIVES or ins[0] in DATA_OPS:
+                continue
+            size = code_size(*ins)
+            a = None if size is None else a + size
+        self.line_address.append(a)
+        # The line to go on from at each address: the first there that is
+        # not data.
+        self.at: dict[int, int] = {}
+        for idx, a in enumerate(self.line_address):
+            if a is not None and (idx == len(self.lines) or self.lines[idx] is None or
+                                  self.lines[idx][0] not in DATA_OPS):
+                self.at.setdefault(a, idx)
+
+    def address(self, line: int) -> int:
+        """The address of line ``line``."""
+        a = self.line_address[line]
+        if a is None:
+            raise SimError(f"the address of line {line} is not known")
+        return a
+
+    def line_at(self, address: int) -> int:
+        """The line an instruction starts at ``address``."""
+        line = self.at.get(address & 0xFFFF)
+        if line is None:
+            raise SimError(f"no instruction starts at {address:04x}")
+        return line
+
     def _initialise_data(self) -> None:
         """What ``db`` and ``dw`` put in memory before the program runs."""
         for addr, op, ops in self.data:
@@ -225,10 +356,14 @@ class Machine:
         if v is not None:
             return v
         low = t.lower()
+        if low == "$":
+            if getattr(self, "pc", None) is None:
+                raise SimError("$ outside an instruction")
+            return self.address(self.pc)
         if low in self.symbols:
             return self.symbols[low]
         if low in self.labels:
-            return CODE_BASE + self.labels[low]
+            return self.address(self.labels[low])
         m = re.match(r"^(low|high)\((.*)\)$", low)
         if m:
             v = self.eval(m.group(2))
@@ -324,10 +459,9 @@ class Machine:
         if v == 0:
             return None  # jp 0: warm boot, the end
         if v is None:
-            # A name an equate sets to a label of code (`ALIAS equ RTN').
-            v = self.eval(label)
-            if CODE_BASE <= v < CODE_BASE + len(self.lines):
-                return v - CODE_BASE
+            # A name an equate sets to a label of code (`ALIAS equ RTN'),
+            # or an address computed from one (`BIOS+3').
+            return self.line_at(self.eval(label))
         raise SimError(f"jump to unknown {label}")
 
     # ---- ALU -------------------------------------------------------------
@@ -642,10 +776,7 @@ class Machine:
         if op in ("jp", "jr"):
             if n == 1:
                 if lo[0] in ("(hl)", "(ix)", "(iy)"):
-                    dest = self.rp(lo[0][1:-1]) - CODE_BASE
-                    if not 0 <= dest < len(self.lines):
-                        raise SimError("indirect jump out of the program")
-                    return dest
+                    return self.line_at(self.rp(lo[0][1:-1]))
                 return self.jump(ops[0])
             if COND[lo[0]](self.f):
                 return self.jump(ops[1])
@@ -665,7 +796,7 @@ class Machine:
             t = self.target(label)
             if t is None:
                 raise SimError("call 0")
-            self.push(CODE_BASE + nxt)
+            self.push(self.address(nxt))
             return t
         if op == "ret":
             if n == 1 and not COND[lo[0]](self.f):
@@ -673,9 +804,7 @@ class Machine:
             back = self.pop()
             if back == SENTINEL:
                 return "ret"
-            if not 0 <= back - CODE_BASE < len(self.lines):
-                raise SimError("return to an address outside the program")
-            return back - CODE_BASE
+            return self.line_at(back)
         if op in ("ldir", "lddr", "ldi", "ldd"):
             while True:
                 self.mem[self.rp("de")] = self.mem[self.rp("hl")]

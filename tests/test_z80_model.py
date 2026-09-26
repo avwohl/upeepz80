@@ -10,6 +10,8 @@ import pytest
 
 from upeepz80.z80 import ALL, FLAGS, UNKNOWN, data_size, effect, strip_comment, split_operands
 
+from tests.z80sim import code_size
+
 R8 = ["a", "b", "c", "d", "e", "h", "l"]
 ALU = ["add a,", "adc a,", "sub ", "sbc a,", "and ", "xor ", "or ", "cp "]
 CC = ["nz", "z", "nc", "c", "po", "pe", "p", "m"]
@@ -103,10 +105,8 @@ def _um80():
     return shutil.which("um80")
 
 
-@pytest.mark.skipif(_um80() is None, reason="um80 is not installed")
-def test_sizes_agree_with_the_assembler():
-    """Relative jumps are only made where the model's sizes say they reach,
-    so the sizes have to be the assembler's."""
+def _assembled() -> list[tuple[str, int | None]]:
+    """Each form, with the size um80 gives it."""
     # Relative jumps first, near their target: um80 makes one that does not
     # reach a jp (and says so) rather than fail.
     body = sorted(forms(), key=lambda f: not f.startswith(("jr", "djnz")))
@@ -123,10 +123,26 @@ def test_sizes_agree_with_the_assembler():
         m = re.match(r"^\s*(\d+)\s+([0-9A-F]{4})\s+((?:[0-9A-F]{2}'?\s)+)", row)
         if m:
             sizes[int(m.group(1))] = len(m.group(3).split())
+    return [(f, sizes.get(n)) for n, f in enumerate(body, start=4)]
+
+
+@pytest.mark.skipif(_um80() is None, reason="um80 is not installed")
+def test_sizes_agree_with_the_assembler():
+    """Relative jumps are only made where the model's sizes say they reach,
+    so the sizes have to be the assembler's."""
+    wrong = [(f, size, model(f).size) for f, size in _assembled() if size != model(f).size]
+    assert not wrong
+
+
+@pytest.mark.skipif(_um80() is None, reason="um80 is not installed")
+def test_the_interpreters_sizes_agree_with_the_assembler():
+    """tests/z80sim.py lays code out by sizes of its own, so that an address
+    computed from a label of code is the assembler's: they are um80's too."""
     wrong = []
-    for n, f in enumerate(body, start=4):
-        if sizes.get(n) != model(f).size:
-            wrong.append((f, sizes.get(n), model(f).size))
+    for f, size in _assembled():
+        op, _, operands = f.partition(" ")
+        if code_size(op, split_operands(operands)) != size:
+            wrong.append((f, size, code_size(op, split_operands(operands))))
     assert not wrong
 
 

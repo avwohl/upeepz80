@@ -117,7 +117,8 @@ _T = "T:\n\tjp c,Y\n\tld a,1\n\tret\nY:\n\tld a,2\n\tret\n"
     "\tjp L1\nL0:\tld a,0\n\tret\nL1:\tld a,5\n\tjp L0\n",
     # a routine that swaps its return address for HL returns to HL, not to
     # the call; the code there reads the carry `xor a' would clear.  (T
-    # comes before what may shrink: the interpreter's addresses are lines.)
+    # comes before what may shrink: the interpreter's addresses are those
+    # of the code as it is assembled.)
     "\tscf\n\tld hl,T\n\tld a,0\n\tcall P\n\tor a\n\tret\n" + _T + "P:\n\tex (sp),hl\n\tret\n",
     # ... or pops it and pushes another
     "\tscf\n\tld de,T\n\tld a,0\n\tcall P\n\tor a\n\tret\n" + _T + "P:\n\tpop hl\n\tpush de\n\tret\n",
@@ -127,7 +128,8 @@ _T = "T:\n\tjp c,Y\n\tld a,1\n\tret\nY:\n\tld a,2\n\tret\n"
     "P:\n\tpush bc\n\tpop bc\n\tjp P2\nP2:\n\tpop hl\n\tpush de\n\tret\n",
     # ... and its caller, which then returns where the stack says, too
     "\tscf\n\tld de,T\n\tld a,0\n\tcall Q\n\tor a\n\tret\n" + _T +
-    "Q:\n\tcall P\n\tret\nP:\n\tpop hl\n\tpop bc\n\tpush de\n\tpush hl\n\tret\n",
+    "Q:\n\tcall P\n\tret\nP:\n\tpop hl\n\tpop bc\n\tpush de\n\tpush hl\n"
+    "\tld hl,0\n\tld bc,0\n\tret\n",
 ])
 def test_every_rewrite_keeps_what_is_read(src):
     assert_equivalent(src)
@@ -196,9 +198,10 @@ def test_liveness_follows_a_value_through_the_stack():
     # Pushed as AF and popped as HL: the flags are in L.
     src = "\tld a,0\n\tpush af\n\tpop hl\n\tld (W),hl\n\tcp b\n\tjp 0\n"
     assert instrs(optimize(src))[0] == "ld a,0"
-    # A routine that takes its return address off the stack.
+    # A routine that takes its return address off the stack, and puts it
+    # back.  (HL, which held it, is cleared: the address is after `ld a,0'.)
     src = ("\tld a,0\n\tcall P\n\tcp b\n\tjp 0\n"
-           "P:\n\tpop hl\n\tpush hl\n\tret\n")
+           "P:\n\tpop hl\n\tpush hl\n\tld hl,0\n\tret\n")
     assert_equivalent(src)
     # ex de,hl moves the value it is asked about.
     src = "\tld hl,5\n\tld a,l\n\tex de,hl\n\tld (W),de\n\tret\n"
