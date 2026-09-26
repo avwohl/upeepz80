@@ -631,10 +631,12 @@ def test_a_jump_whose_operand_is_read_keeps_it(src):
 def test_no_jump_is_threaded_through_a_jump_the_program_patches(patch, go):
     """The program writes MINE over VEC's operand: VEC goes to MINE, and
     so does GO.  Jump threading took VEC to go on to REAL, through
-    HANDLER, and made GO's jump `jp REAL'."""
+    HANDLER, and made GO's jump `jp REAL'.  (0.2.6 removed VEC's `jp
+    HANDLER' instead, as a jump to the next line.)"""
     src = patch + "\tcall GO\n\tld (V),a\n\tjp 0\n" + go + "\tnop\n" + VEC
     out = optimize(src)
     assert [line for line in instrs(out) if line in ("jp VEC", "jr VEC", "call VEC")], out
+    assert "jp HANDLER" in instrs(out), out
 
 
 # HANDLER writes the carry; MINE, which the program writes over the operand of
