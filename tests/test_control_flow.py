@@ -603,4 +603,23 @@ def test_no_jump_is_threaded_through_a_jump_the_program_patches(patch, go):
     HANDLER, and made GO's jump `jp REAL'."""
     src = patch + "\tcall GO\n\tld (V),a\n\tjp 0\n" + go + "\tnop\n" + VEC
     out = optimize(src)
-    assert [line for line in instrs(out) if line in ("jp VEC", "jr VEC")], out
+    assert [line for line in instrs(out) if line in ("jp VEC", "jr VEC", "call VEC")], out
+
+
+# HANDLER writes the carry before it reads it; MINE, which the program writes
+# over the operand of the jump or call, reads it.
+FLAG_VEC = ("HANDLER:\n\tor 1\n\tld a,2\n\tret\nMINE:\n\tld a,3\n\tret nc\n\tld a,4\n\tret\n")
+
+
+@pytest.mark.parametrize("src", [
+    "\tld hl,MINE\n\tld (VEC+1),hl\n\tcall GO\n\tld (V),a\n\tjp 0\n"
+    "GO:\n\tscf\n\tld a,0\n\tjp VEC\n\tnop\nVEC:\n\tjp HANDLER\n",
+    "\tld hl,MINE\n\tld (CL+1),hl\n\tcall GO\n\tld (V),a\n\tjp 0\n"
+    "GO:\n\tscf\n\tld a,0\nCL:\n\tcall HANDLER\n\tret\n",
+])
+def test_where_a_jump_or_call_the_program_patches_goes_is_not_known(src):
+    """The carry is read where GO goes, at MINE: liveness followed the jump,
+    or the call, to HANDLER, where the carry is written first, and `ld
+    a,0' became `xor a'."""
+    out = optimize(src + FLAG_VEC)
+    assert "ld a,0" in instrs(out), out

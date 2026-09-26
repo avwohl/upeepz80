@@ -358,10 +358,17 @@ class _Routines:
         self.calls: dict[int, list[int]] = {}
         for idx, eff in enumerate(effects):
             if eff is not None and eff.flow == "call":
-                t = code.target(eff.target)
+                t = code.dest(idx)
                 if t is not None:
                     self.calls.setdefault(t, []).append(idx + 1)
         open_roots = {0} | code.offset_entries
+        # A jump or call the program may patch may still go where it names.
+        for idx in code.patched:
+            eff = effects[idx]
+            if eff is not None and eff.flow in ("jump", "branch", "call"):
+                t = code.target(eff.target)
+                if t is not None:
+                    open_roots.add(t)
         for name, idx in code.label_lines:
             if name.lower() in named or name.lower() in code.exported or \
                     code.labels.get(name) is None:
@@ -378,10 +385,10 @@ class _Routines:
             if eff is None or eff.flow == "next" or eff.flow == "call":
                 return [i + 1]
             if eff.flow == "jump":
-                t = code.target(eff.target)
+                t = code.dest(i)
                 return [] if t is None else [t]
             if eff.flow == "branch":
-                t = code.target(eff.target)
+                t = code.dest(i)
                 return [i + 1] if t is None else [i + 1, t]
             if eff.flow == "return" and eff.cond:
                 return [i + 1]
@@ -427,19 +434,18 @@ class _Routines:
                 gone.add(i)
             elif eff.flow == "return":
                 exits.add(i)
-            elif eff.flow in ("jump", "branch", "call") and eff.target is not None and \
-                    code.unfollowed(eff.target):
+            elif eff.flow in ("jump", "branch", "call") and code.lost(i):
                 gone.add(i)
             elif eff.flow in ("jump", "branch") and eff.target is not None and \
                     code.target(eff.target) is None:
                 exits.add(i)
             if eff.flow == "call":
                 calls.add(i)
-                t = code.target(eff.target)
+                t = code.dest(i)
                 if t is not None:
                     self._kind[i] = ("call", t)
                     stack_ops.add(i)
-                elif eff.target is not None and code.unfollowed(eff.target):
+                elif code.lost(i):
                     self._kind[i] = ("lost",)
                 else:
                     self._kind[i] = ("out",)
@@ -529,7 +535,7 @@ class _Routines:
         # is wild.  Code that calls code that peeks, or is wild, is so too.
         # A routine that is not regular, or reaches its return address, or
         # leaves the stack other than it found it, peeks.
-        callees_of = {root: {code.target(effects[i].target) for i in reach[root] & calls}
+        callees_of = {root: {code.dest(i) for i in reach[root] & calls}
                       for root in roots}
 
         def closed_over_calls(found: set[int]) -> set[int]:
@@ -576,8 +582,7 @@ class _Routines:
                 # is taken to be its return address: see Known issues.)
                 return h is not None and not self.returns(i) and h - 1 not in places[i]
             if eff.flow in ("stop", "data") or (
-                    eff.flow in ("jump", "branch") and eff.target is not None and
-                    code.unfollowed(eff.target)):
+                    eff.flow in ("jump", "branch") and code.lost(i)):
                 return h is None or h not in places[i]
             return False
 
@@ -805,6 +810,20 @@ class _Code:
         if name is None:
             return None
         return self.labels.get(name)
+
+    def dest(self, i: int) -> int | None:
+        """The line the jump, branch or call on line ``i`` goes to: the
+        label it names, unless the program may patch it (:attr:`patched`)."""
+        if i in self.patched:
+            return None
+        return self.target(self.effects[i].target)
+
+    def lost(self, i: int) -> bool:
+        """Does the jump, branch or call on line ``i`` go to an address of
+        this text that is not followed: one the program may write over its
+        operand (:attr:`patched`), or one :meth:`unfollowed` finds?"""
+        target = self.effects[i].target
+        return i in self.patched or (target is not None and self.unfollowed(target))
 
     def unfollowed(self, name: str) -> bool:
         """Is ``name``, where a jump or call goes, an address in this text
@@ -1110,6 +1129,7 @@ class _Code:
         ran out of ``budget``."""
         routines = self.routines
         height = routines.height
+        patched = self.patched
         n = len(self.effects)
         while work:
             i, need, frames = work.pop()
@@ -1182,7 +1202,7 @@ class _Code:
                     # de / ld a,(hl)'.
                     return True
                 if eff.flow == "call":
-                    t = self.target(eff.target)
+                    t = None if i in patched else self.target(eff.target)
                     if t is None or depth >= _MAX_FRAMES:
                         return True
                     if eff.cond:
@@ -1218,9 +1238,9 @@ class _Code:
                 if eff.flow == "next":
                     i += 1
                 elif eff.flow == "jump":
-                    i = self.target(eff.target)
+                    i = None if i in patched else self.target(eff.target)
                 elif eff.flow == "branch":
-                    t = self.target(eff.target)
+                    t = None if i in patched else self.target(eff.target)
                     if t is None:
                         return True
                     work.append((t, need, frames))
