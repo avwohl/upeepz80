@@ -3,7 +3,7 @@
 Notable changes to upeepz80. Releases up to 0.2.4 are described on the
 [GitHub releases page](https://github.com/avwohl/upeepz80/releases).
 
-## Unreleased
+## 0.2.7 - 2026-09-26
 
 The corpus below is what uplm80 0.4.0 (d8fd4ed) makes of the MP/M II and
 80un PL/M sources at `-O2`: 87 texts, of which 77 assemble. On it this
