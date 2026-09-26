@@ -655,3 +655,17 @@ def test_where_a_jump_or_call_the_program_patches_goes_is_not_known(src):
     out = optimize(src + FLAG_VEC)
     assert "ld a,0" in instrs(out), out
 
+
+@pytest.mark.parametrize("patch", [
+    "\tld a,0C9h\n\tld (SW),a\n",  # `ret'
+    "\txor a\n\tld (SW),a\n",  # `nop'
+    "\tld hl,0C9C9h\n\tld (SW),hl\n",  # and `ret' over the `ret' after it
+])
+def test_liveness_reads_everything_at_an_instruction_the_program_patches(patch):
+    """The program writes `ret', or `nop', over SW's `or a': SUB returns
+    with the carry its caller set, which the caller reads.  Liveness took
+    `or a' to write the carry first, and SUB's `ld a,0' became `xor a'."""
+    src = (patch + "\tscf\n\tcall SUB\n\tld a,0\n\tjr nc,N\n\tinc a\nN:\n\tld (V),a\n\tjp 0\n"
+           "SUB:\n\tld a,0\nSW:\n\tor a\n\tret\n")
+    out = instrs(optimize(src))
+    assert out[out.index("or a") - 1] == "ld a,0", out

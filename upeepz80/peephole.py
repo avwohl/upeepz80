@@ -1106,7 +1106,8 @@ class _Code:
         (Another module is taken not to reach below the SP it calls with.)
         What cannot be followed - a call or jump out of the module, ``jp
         (hl)``, a ``ret`` from code entered who knows how, data, the end of
-        the text, a stack that is not balanced - reads everything."""
+        the text, a stack that is not balanced, an instruction the program
+        may write over (:attr:`patched`) - reads everything."""
         need0 = frozenset(resources)
         if not need0:
             return False
@@ -1160,6 +1161,10 @@ class _Code:
                 budget[0] -= 1
                 if budget[0] < 0:
                     return None
+                if i in patched:
+                    # The program may write another instruction here:
+                    # `ld a,0C9h / ld (SW),a' over `SW: or a'.
+                    return True
                 if not frames:
                     if any(d >= need for d in self._dead.get(i, ())):
                         break
@@ -1218,7 +1223,7 @@ class _Code:
                     # de / ld a,(hl)'.
                     return True
                 if eff.flow == "call":
-                    t = None if i in patched else self.target(eff.target)
+                    t = self.target(eff.target)
                     if t is None or depth >= _MAX_FRAMES:
                         return True
                     if eff.cond:
@@ -1254,9 +1259,9 @@ class _Code:
                 if eff.flow == "next":
                     i += 1
                 elif eff.flow == "jump":
-                    i = None if i in patched else self.target(eff.target)
+                    i = self.target(eff.target)
                 elif eff.flow == "branch":
-                    t = None if i in patched else self.target(eff.target)
+                    t = self.target(eff.target)
                     if t is None:
                         return True
                     work.append((t, need, frames))
