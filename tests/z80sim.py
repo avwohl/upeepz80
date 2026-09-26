@@ -296,12 +296,13 @@ class Machine:
             size = code_size(*ins)
             a = None if size is None else a + size
         self.line_address.append(a)
-        # The line to go on from at each address: the first there that is
-        # not data.
+        # The line to go on from at each address: the instruction there (a
+        # label or data before it takes no room), or the end.
         self.at: dict[int, int] = {}
         for idx, a in enumerate(self.line_address):
-            if a is not None and (idx == len(self.lines) or self.lines[idx] is None or
-                                  self.lines[idx][0] not in DATA_OPS):
+            ins = self.lines[idx] if idx < len(self.lines) else None
+            if a is not None and (ins is None and idx == len(self.lines) or ins is not None and
+                                  ins[0] not in DATA_OPS and ins[0] not in DIRECTIVES):
                 self.at.setdefault(a, idx)
 
     def address(self, line: int) -> int:

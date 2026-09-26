@@ -2622,6 +2622,7 @@ class PeepholeOptimizer:
 
         # Rewrite jumps to use final destinations
         result: list[str] = []
+        named_at: dict[str, list[int]] = {}
         for i, line in enumerate(lines):
             parsed = None if self._is_label_line(line) else self._parse_line(line)
             if parsed and parsed[0] in ("jp", "jr") and "," not in parsed[1] and \
@@ -2640,8 +2641,10 @@ class PeepholeOptimizer:
                     result.append(f"\tjr {new_target}")
                 changed = True
                 self.stats["jump_thread"] = self.stats.get("jump_thread", 0) + 1
-            elif parsed and parsed[0] == "dw" and parsed[1].strip() in label_target:
-                # Thread dw references
+            elif parsed and parsed[0] == "dw" and parsed[1].strip() in label_target and \
+                    self._only_jumped_through(code, lines, i, label_target[parsed[1].strip()],
+                                              named_at):
+                # A word of a table of addresses that are only jumped to.
                 result.append(f"\tdw {label_target[parsed[1].strip()]}")
                 changed = True
                 self.stats["dw_thread"] = self.stats.get("dw_thread", 0) + 1
@@ -2696,6 +2699,62 @@ class PeepholeOptimizer:
             i += 1
 
         return final_result, changed
+
+    # How a table of addresses is jumped through: DE is given its address,
+    # HL the offset of an entry; then HL gets the entry, and control goes
+    # there.  DE is left pointing at the entry's high byte.
+    _DISPATCH = [("add", "hl,de"), ("ld", "e,(hl)"), ("inc", "hl"), ("ld", "d,(hl)"),
+                 ("ex", "de,hl"), ("jp", "(hl)")]
+
+    def _only_jumped_through(self, code: _Code, lines: list[str], i: int, new: str,
+                             named_at: dict[str, list[int]]) -> bool:
+        """Is the ``dw`` on line ``i`` an entry of a table that is only
+        jumped through, so that it may hold ``new`` in place of its label?
+
+        A word that holds the address of code need not be jumped to: a
+        program may compare it, or keep it.  Here the table's words are read
+        only by the dispatch above, which the only line that names the
+        table starts, and control does not go on into the table: an entry
+        is jumped to with the entry itself in HL, and a pointer to it in DE.
+        The entry's label L is ``jp M``: jumped to, it goes on to M with L
+        in HL.  So ``dw M`` does the same where HL is not read at M."""
+        t = code.target(new)
+        if t is None:
+            return False
+        # The table: the lines of words back to its label, all of them `dw',
+        # after a `jp (hl)'.
+        table = None
+        for j in range(i, -1, -1):
+            label, op, _ = _split(lines[j])
+            if op is not None and op != "dw":
+                return False
+            if label is not None:
+                table = label
+                break
+        if table is None:
+            return False
+        for k in range(j - 1, -1, -1):
+            _, op, operands = _split(lines[k])
+            if op is not None:
+                if (op, operands.lower()) != ("jp", "(hl)"):
+                    return False
+                break
+        # The one line that names it, and the dispatch after it.  (Where each
+        # name is used is found once, for all the tables.)
+        if not named_at:
+            for k, line in enumerate(lines):
+                for name in _names(_split(line)[2]):
+                    named_at.setdefault(name, []).append(k)
+            named_at.setdefault("", [])
+        uses = named_at.get(table.lower(), [])
+        if len(uses) != 1 or table.lower() in code.exported:
+            return False
+        window = self._window(lines, uses[0], len(self._DISPATCH) + 1)
+        if window is None:
+            return False
+        _, instrs, _, _ = window
+        return [(op, arg.lower()) for op, arg in instrs] == \
+            [("ld", f"de,{table.lower()}")] + self._DISPATCH and not code.live([t], {"h", "l"})
 
     def _frozen_jump(self, code: _Code, lines: list[str], i: int) -> bool:
         """Is the jump that the label on line ``i`` stands before one that

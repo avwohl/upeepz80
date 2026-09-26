@@ -6,7 +6,7 @@ import pytest
 from upeepz80 import optimize
 
 from tests._equiv import assert_equivalent, instrs
-from tests.z80sim import Machine
+from tests.z80sim import DATA_BASE, Machine
 
 
 def test_the_interpreter_jumps_to_a_name_an_equate_sets_to_code():
@@ -494,3 +494,29 @@ def test_code_between_a_label_and_an_address_computed_from_it_keeps_its_size():
     src = "\tld hl,LB+2\n\tjp (hl)\nLB:\n\tld a,0\n\tjp MM\nMM:\n\tcp b\n\tld hl,0\n\tret\n"
     out = assert_equivalent(src)
     assert instrs(out)[2:4] == ["ld a,0", "jp MM"], out
+
+
+# ---- A word that holds the address of code ------------------------------------
+
+def test_a_word_of_code_that_is_compared_keeps_its_label():
+    """C0 is `jp DONE', and the word TBL holds its address.  It became `dw
+    DONE', so the comparison with C0 failed."""
+    src = ("\tld hl,(TBL)\n\tld de,C0\n\tor a\n\tsbc hl,de\n\tld a,0\n\tjr nz,X\n\tld a,1\n"
+           "X:\n\tld (V),a\n\tld hl,0\n\tld de,0\n\tret\nTBL:\n\tdw C0\nC0:\n\tjp DONE\n"
+           "\tld a,2\nDONE:\n\tret\n")
+    out = assert_equivalent(src)
+    assert "dw C0" in instrs(out), out
+
+
+def test_a_table_only_jumped_through_is_threaded():
+    """The dispatch uplm80 writes for DO CASE: a word of its table is only
+    jumped to, with itself in HL, which the code there does not read.  (The
+    table itself is not compared.)"""
+    src = ("\tld a,(X)\n\tand 1\n\tld l,a\n\tld h,0\n\tadd hl,hl\n\tld de,TBL\n\tadd hl,de\n"
+           "\tld e,(hl)\n\tinc hl\n\tld d,(hl)\n\tex de,hl\n\tjp (hl)\nTBL:\n\tdw C0\n\tdw C1\n"
+           "C0:\n\tjp DONE\nC1:\n\tld a,1\n\tjp DONE\nDONE:\n\tld hl,0\n\tld de,0\n\tret\n")
+    out = assert_equivalent(src, ignore=range(DATA_BASE, DATA_BASE + 4))
+    assert "dw DONE" in instrs(out), out
+    # Where the code there reads HL, which holds C0 or DONE, it is not.
+    src = src.replace("DONE:\n\tld hl,0\n", "DONE:\n\tld (W),hl\n\tld hl,0\n")
+    assert "dw DONE" not in instrs(optimize(src))
