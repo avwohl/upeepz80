@@ -565,8 +565,9 @@ def test_a_table_whose_target_reads_the_entry_through_de_is_not_threaded(read):
 
 # ---- A jump whose operand an address computed from a label reaches ------------
 #
-# z80sim does not put the bytes of code in memory, so these look at the code:
-# on um80, ul80 and cpmemu each program prints something else once optimized.
+# z80sim does not put the bytes of code in memory, so these look at the code.
+# Programs like them, run on um80, ul80 and cpmemu, print something else once
+# optimized.
 
 VEC = ("VEC:\n\tjp HANDLER\nHANDLER:\n\tjp REAL\nOTHER:\n\tld a,1\n\tret\nREAL:\n\tld a,2\n\tret\n"
        "MINE:\n\tld a,3\n\tret\n")
@@ -606,8 +607,8 @@ def test_no_jump_is_threaded_through_a_jump_the_program_patches(patch, go):
     assert [line for line in instrs(out) if line in ("jp VEC", "jr VEC", "call VEC")], out
 
 
-# HANDLER writes the carry before it reads it; MINE, which the program writes
-# over the operand of the jump or call, reads it.
+# HANDLER writes the carry; MINE, which the program writes over the operand of
+# the jump or call, reads it.
 FLAG_VEC = ("HANDLER:\n\tor 1\n\tld a,2\n\tret\nMINE:\n\tld a,3\n\tret nc\n\tld a,4\n\tret\n")
 
 

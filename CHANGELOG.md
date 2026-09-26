@@ -7,11 +7,11 @@ Notable changes to upeepz80. Releases up to 0.2.4 are described on the
 
 The corpus below is what uplm80 0.4.0 (d8fd4ed) makes of the MP/M II and
 80un PL/M sources at `-O2`: 87 texts, of which 77 assemble. On it this
-release's code is 146 bytes smaller than 0.2.6's, 210,254 against 210,400,
+release's code is 144 bytes smaller than 0.2.6's, 210,256 against 210,400,
 in 22 outputs. Following the returns of routines that take their arguments
-off the stack gains 165 bytes; the fixes below cost 19. `optimize()` takes
-14% more CPU time than 0.2.6's over the seven largest texts: 6.33s against
-5.56s, the median of three runs, and PIP.PLM 1.13s against 0.93s.
+off the stack gains 165 bytes; the fixes below cost 21. `optimize()` takes
+21% more CPU time than 0.2.6's over the seven largest texts: 4.70s against
+3.88s, the median of five runs, and PIP.PLM 0.80s against 0.62s.
 
 ### Fixed
 
@@ -38,12 +38,16 @@ off the stack gains 165 bytes; the fixes below cost 19. `optimize()` takes
   takes is not the return address, or the height is not known, the code
   it goes to may be entered with something pushed: no tail call is then
   made in code that may be entered from anywhere. On the corpus this costs
-  10 tail calls: 4 in each build of PIP, whose ERROR goes on to RETRY in
+  11 tail calls: 4 in each build of PIP, whose ERROR goes on to RETRY in
   the main program, so the heights after its calls are not known; one in
   DM, where the height after `push hl / call PDECIMAL` is counted as if
   PDECIMAL, of another module, left its argument pushed (see Known issues);
-  and one in SN, whose routines write through pointers where it makes one
-  from SP.
+  one in SN, whose routines write through pointers where it makes one from
+  SP; and one in PRLCOM, where `call CLOSEFILE / ret` in COPYPRLTOCOM stays:
+  WRITEBUFFER, which COPYPRLTOCOM calls, goes on an error to ERROR, which
+  sets SP and jumps to ??BOOT. A routine that jumps out of the text where
+  the height is not known is not regular, and the height after a call of
+  it is not known.
 - **A `pop` of the return address was not seen as moving it where the
   routine's entry height is not known.** 0.2.6 listed this as a known
   issue. When the ways into a routine disagree about the height (a routine
@@ -61,8 +65,9 @@ off the stack gains 165 bytes; the fixes below cost 19. `optimize()` takes
   against what a jump the optimizer cannot follow may have pushed: `push
   hl / ld hl,LL+3 / jp (hl)` with `LL: jp 0 / call SHOWP / ret` became `jp
   SHOWP`, and so did `jp LL+3`, `push hl / ret` to it, `jr $+3` over a
-  `ret`, and the second entry of a `jp` table (`ld hl,TBL+3 / jp (hl)`).
-  And a rewrite could change the size of the code between a label and an
+  `ret`, and the second entry of a `jp` table, at TBL+3 (`ld hl,TBL+3 / jp
+  (hl)`) or at an offset computed at run time (see the next entry). And a
+  rewrite could change the size of the code between a label and an
   address computed from it: with `ld hl,LB+2 / jp (hl)` and `LB: ld a,0 /
   jp MM`, `ld a,0` became `xor a`, and `jp MM` went as a jump to the next
   line, so LB+2 was past MM's first instruction. Now an expression that
@@ -76,17 +81,47 @@ off the stack gains 165 bytes; the fixes below cost 19. `optimize()` takes
   the label's run of code of known size is so. Nothing changes on the
   corpus: its only such expression is PL/M-80's `dw (START-3)`, which
   covers `ld sp,??STACK`.
-- **A vector of `jp` instructions that another module enters at an offset
-  became a vector of `jr`,** as in 0.2.5 and 0.2.6: `BIOS:: jp BOOT / jp
-  WBOOT`, called at BIOS+3, became `jr BOOT / jr WBOOT`, two bytes each.
-  And jump threading removed `WBE: jp WBOOT` after `BIOS:: jp BOOT`, as a
-  jump whose label nothing names. Another module can compute an address
-  only from a label the text exports, and what it does with one the
-  optimizer cannot know; a label that `jp` instructions follow is the
-  vector. The `jp` instructions after a label the text exports (`NAME::`,
-  `public`, `global`, `entry`) are now left as they are, and each may be
-  entered from anywhere. Nothing changes on the corpus, where no exported
-  label is followed by a `jp`.
+- **A table of `jp` instructions entered at an offset, which the program
+  computes at run time or another module computes, became a table of
+  `jr`,** as in 0.2.5 and 0.2.6. With `ld de,TBL / add hl,de / jp (hl)`
+  and `TBL: jp H0 / jp H1`, `jp H1` counted as reached by nothing, and so
+  did H1: `H1: call SHOWP / ret` became `jp SHOWP`, with what QQ pushed
+  before the dispatch still on the stack, and `jp H0` became `jr H0`, so
+  that TBL+3 was inside `jp H1`. `BIOS:: jp BOOT / jp WBOOT`, called at
+  BIOS+3 from another module, became `jr BOOT / jr WBOOT`, two bytes each;
+  and jump threading removed `WBE: jp WBOOT` after `BIOS:: jp BOOT`, as a
+  jump whose label nothing names. The program can compute an address at
+  run time only from a label it names, and another module only from one
+  the text exports; what either does with it the optimizer cannot know. A
+  label that `jp` instructions follow is the table, or the vector. The
+  `jp` instructions after a label the text names other than as where a
+  jump or call goes (`ld de,TBL`, `dw TBL`, `TB equ TBL`, `jp TBL+3`), or
+  exports (`NAME::`, `public`, `global`, `entry`), are now left as they
+  are, and each may be entered from anywhere. On the corpus this costs 2
+  bytes, one in each build of PIP: the arm `jp @PUTDCHAR$LSTL`, whose label
+  a `DO CASE` table names, stays `jp`. No exported label there is followed
+  by a `jp`.
+- **A jump whose operand the program reads or writes was given another,
+  and taken to go where it named,** as 0.2.5 and 0.2.6 do. With `VEC: jp
+  HANDLER` and `HANDLER: jp REAL`, jump threading made VEC `jp REAL`, so
+  that `ld hl,(VEC+1)` found REAL where it had found HANDLER, and a
+  program that keeps the operand, to chain the vector to its own code,
+  kept REAL. Where the program writes MINE over VEC's operand (`ld
+  hl,MINE / ld (VEC+1),hl`), a jump to VEC was threaded to REAL, and
+  liveness followed VEC to HANDLER: `scf / ld a,0 / jp VEC` became `scf /
+  xor a / jp VEC`, where HANDLER writes the carry and MINE reads it. So
+  with `CL: call HANDLER` and `ld (CL+1),hl`. Now jump threading gives no
+  jump that an address computed from a label reaches another operand. And
+  an instruction at an address that is not only jumped to - where a load,
+  a store or a pointer may reach (`ld hl,(VEC+1)`, `ld (VEC+1),hl`, `ld
+  hl,VEC+1`) - may be patched: a jump or call there goes where the
+  optimizer cannot follow, as `jp (hl)` does. No jump, and no `dw` of a
+  table, is threaded through it; liveness reads everything there; a
+  routine whose code reaches it is not regular, so no tail call is made
+  to it; and the label it names may be entered from anywhere. So it is
+  with each `jp` of a vector the text exports, which another module may
+  patch, and with every instruction of a run of code where an address in
+  it cannot be worked out. Nothing changes on the corpus.
 - **`dw L`, where L is `jp M`, became `dw M`,** as in 0.2.5 and 0.2.6. A
   word that holds the address of code was taken to be an address that is
   only jumped to; a program that compares it, or keeps it, sees another
@@ -96,8 +131,10 @@ off the stack gains 165 bytes; the fixes below cost 19. `optimize()` takes
   label nothing exports and one line names, `ld de,TBL`, followed by `add
   hl,de / ld e,(hl) / inc hl / ld d,(hl) / ex de,hl / jp (hl)`, as uplm80
   writes for `DO CASE`. Jumped to, L goes on to M with L in HL, which the
-  dispatch leaves there; so the word is threaded only where the code at M
-  does not read HL. On the corpus this keeps one word of each build of
+  dispatch leaves there, and DE pointing at the entry's high byte, which
+  holds M's once the word is threaded; so the word is threaded only where
+  the code at M reads neither HL nor DE (`dec de / ld a,(de)` reads the
+  entry's low byte). On the corpus this keeps one word of each build of
   PIP's tables as it was, 4 bytes in all: the arm goes to code that calls
   ??BDOS, of another module, which is taken to read HL.
 
@@ -139,9 +176,16 @@ off the stack gains 165 bytes; the fixes below cost 19. `optimize()` takes
   BIOS+3 and BIOS+6 (three ways), LB+2, and the compared word. Each runs
   the code before and after optimization, and fails on 0.2.6. So does the
   dispatch table, threaded, but not where its target reads HL; a tail call
-  where the return address is on top a word higher; and, in
+  where the return address is on top a word higher; the dispatch table
+  where the code at the entry reads it through DE (two ways); the table of
+  jumps entered at an offset computed at run time (five ways); and, in
   `tests/test_liveness.py`, `ld a,0` before a call of a routine that takes
-  its argument off the stack. 18 of the 368 tests fail on 0.2.6.
+  its argument off the stack. z80sim does not put the bytes of code in
+  memory: the jump whose operand the program reads (two ways), the jumps
+  to one it patches (six), and the patched jump and call that liveness
+  followed look at the code instead, and fail on 0.2.6 but for the six,
+  where 0.2.6 removes the patched jump instead, as one to the next line.
+  29 of the 385 tests fail on 0.2.6.
 - `tests/peepfuzz.py`: a quarter of the programs also call a routine that
   takes an argument its caller pushed off the stack, from a random stream
   of their own, so that the rest of each program is as it was. 0.2.6 and
@@ -194,10 +238,13 @@ off the stack gains 165 bytes; the fixes below cost 19. `optimize()` takes
   an instruction. An address computed at run time from another is not
   seen: a routine that returns past the bytes after its call (`pop hl /
   inc hl / push hl / ret`) depends on the size of the instruction there,
-  which a rewrite may change. Nor is one that another module computes from
-  a label the text exports, other than one that `jp` instructions follow.
-  From a label of data, an address is taken to stay in the data it labels
-  or point where that ends.
+  which a rewrite may change. Nor is a write through one into code: after
+  `ld hl,VEC / inc hl / ld (hl),e`, VEC's jump is taken to go where it
+  names. Nor is one that another module computes from a label the text
+  exports, or that the program computes from a label it names, other than
+  into the `jp` instructions after the label. From a label of data, an
+  address is taken to stay in the data it labels or point where that
+  ends.
 
 ## 0.2.6 - 2026-09-25
 
