@@ -22,12 +22,14 @@ For compilers that generate 8080 mnemonics, use upeep80 instead.
 from __future__ import annotations
 
 import re
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable
 
 from .z80 import (
     PAIRS as _PAIRS,
+    _balanced_outer,
     BARRIERS,
     DATA,
     FLAGS,
@@ -220,6 +222,35 @@ _KEEPERS = ("bc", "de", "hl", "ix", "iy")
 _FREE_ROUNDS = 8
 
 
+@lru_cache(maxsize=1 << 16)
+def _offset_items(line: str) -> tuple[tuple[str, str, frozenset[str]], ...]:
+    """The expressions on ``line`` that may compute an address from another
+    (``L+3``, ``$-2``, ``(L+1)``), each with how it is used - "goto" (where
+    a jump or call goes), "load" (the address of a load or store) or
+    "value" - and the names it uses.  A name as it is, if any, is where it
+    points, and is left out (but for a load, which may read code)."""
+    label, op, operands = _split(line)
+    if op is None or not operands or op in _LINKAGE or not (
+            "+" in operands or "-" in operands or "$" in operands or "(" in operands):
+        return ()
+    if op in _EQUATES:
+        items = [(operands, "value")] if label else []
+    elif op in DATA:
+        items = [] if op in ("ds", "defs") else [(i, "value") for i in split_operands(operands)]
+    else:
+        eff = effect(op, operands)
+        target = eff.target if eff.flow in ("jump", "branch", "call") else None
+        items = []
+        for part in split_operands(operands):
+            if target is not None and part.strip() == target:
+                items.append((part, "goto"))
+            elif part.strip().startswith("(") and classify(part).kind == "mem_abs":
+                items.append((part.strip()[1:-1], "load"))
+            else:
+                items.append((part, "value"))
+    return tuple((text, kind, _names(text)) for text, kind in items if _names(text))
+
+
 class _Routines:
     """Where each line's ``ret`` goes, and how deep the stack is there.
 
@@ -231,8 +262,9 @@ class _Routines:
     takes the return address the call pushed.  Code that can be reached any
     other way - from the first line, from a label something names or the
     module exports, from after data, a directive, ``jp (hl)`` or an
-    instruction not recognised - may have been entered from anywhere, and
-    so may its ``ret`` go anywhere.
+    instruction not recognised, at an address computed from a label
+    (:attr:`_Code.offset_entries`) - may have been entered from anywhere,
+    and so may its ``ret`` go anywhere.
 
     ``height`` is the number of words pushed since the routine was entered,
     less those popped, where every way to a line agrees on it, else None.
@@ -341,7 +373,7 @@ class _Routines:
                 t = code.target(eff.target)
                 if t is not None:
                     self.calls.setdefault(t, []).append(idx + 1)
-        open_roots = {0}
+        open_roots = {0} | code.offset_entries
         for name, idx in code.label_lines:
             if name.lower() in named or name.lower() in code.exported or \
                     code.labels.get(name) is None:
@@ -722,8 +754,13 @@ class _Code:
         self.labels: dict[str, int | None] = {}
         self.label_lines: list[tuple[str, int]] = []
         self.equ: dict[str, int] = {}
-        # Labels defined with `::', lowercase.
+        # Names an equate sets once to anything but a number, lowercase: the
+        # expression, and its line.
+        self.aliases: dict[str, tuple[str, int]] = {}
+        # Labels defined with `::', lowercase; and the names `public',
+        # `global' and `entry' give.
         self.exported: set[str] = set()
+        self.public: set[str] = set()
         self.radix = _radix(lines)
         # What earlier questions to live() found, for the lines where they
         # were outside every routine they had followed a call into: the sets
@@ -743,6 +780,10 @@ class _Code:
                     self.equ[label] = v
                 else:
                     self.equ.pop(label, None)
+                if op == "equ" and v is None and label not in seen_equ:
+                    self.aliases[label.lower()] = (operands, idx)
+                else:
+                    self.aliases.pop(label.lower(), None)
                 seen_equ.add(label)
                 self.effects.append(None)
                 self.pointer_reads.append(False)
@@ -753,6 +794,8 @@ class _Code:
                 # A label defined twice is nowhere in particular.
                 self.labels[label] = None if label in self.labels else idx
                 self.label_lines.append((label, idx))
+            if op in ("public", "global", "entry"):
+                self.public |= _names(operands)
             eff = None if op is None else effect(op, operands, self.radix)
             self.effects.append(eff)
             self.pointer_reads.append(_reads_through_pointer(op, operands))
@@ -766,6 +809,7 @@ class _Code:
             {name.lower() for name in seen_equ} - numbers
         self._layout: tuple[list[int], list[int], list[int]] | None = None
         self._routines: _Routines | None = None
+        self._offsets: tuple[set[int], set[int]] | None = None
         self._unfollowed: dict[str, bool] = {}
 
     def target(self, name: str | None) -> int | None:
@@ -796,6 +840,183 @@ class _Code:
         if self._routines is None:
             self._routines = _Routines(self)
         return self._routines
+
+    @property
+    def offset_entries(self) -> set[int]:
+        """Lines that an address computed from a label may enter."""
+        return self._offsets_found()[0]
+
+    @property
+    def frozen(self) -> set[int]:
+        """Lines that no rewrite may change or remove."""
+        return self._offsets_found()[1]
+
+    def _offsets_found(self) -> tuple[set[int], set[int]]:
+        """The code an address computed from a label may reach.
+
+        A program that computes an address from a label - ``ld hl,LL+3``,
+        ``jp BIOS+3``, ``dw START-3``, ``jr $+3``, ``ld (L+1),hl`` - depends
+        on the size of the code between the label and the address, and may
+        go to what is there, or read or write the word there.  So the
+        instructions between the two, and the one at the address (unless
+        the address is only jumped to), are ``frozen``: no rewrite may
+        change or remove them.  And the line at the address, where one
+        starts there, may be entered from anywhere, as a label something
+        names may: it is one of the ``offset_entries``.  (A label named as
+        it is, ``ld hl,L``, is itself where it points.)
+
+        Another module can compute such an address too, from a label the
+        text exports.  What it does with one is not known; the vector of
+        ``jp`` instructions that a BIOS exports its first label of, and
+        that other modules enter at BIOS+3, BIOS+6..., is the pattern: an
+        exported label that ``jp`` instructions follow.  Each of them is
+        frozen, and each may be entered from anywhere.
+
+        Sizes are the optimizer's own (:meth:`layout`).  Where the address
+        cannot be worked out - an expression other than NAME+N or NAME-N,
+        a size not known between - every line of the label's run of code
+        of known size is frozen and may be entered from anywhere.  From a
+        label of data, an address is taken to stay in the data it labels,
+        or to point where that data ends (see :class:`_Storage`), after
+        which code is taken to be entered from anywhere anyway."""
+        if self._offsets is not None:
+            return self._offsets
+        entries: set[int] = set()
+        frozen: set[int] = set()
+        self._offsets = (entries, frozen)
+        n = len(self.lines)
+        effects = self.effects
+        labels = {name.lower(): idx for name, idx in self.label_lines
+                  if self.labels.get(name) is not None}
+        self._vectors(labels, entries, frozen)
+        known: dict[int, bool] = {}
+
+        def code_at(j: int) -> bool:
+            """Is the first line from ``j`` on that has bytes an instruction?"""
+            if j not in known:
+                k = j
+                while k < n and (effects[k] is None or effects[k].size == 0):
+                    k += 1
+                known[j] = k < n and effects[k].flow != "data"
+            return known[j]
+
+        # From a label of data, an address stays in the data, or points
+        # where it ends, after which the code is entered from anywhere
+        # already (see _Routines).
+        work = [(idx, text, kind, names) for idx, line in enumerate(self.lines)
+                for text, kind, names in _offset_items(line)
+                if "$" in names or any(name in self.aliases or
+                                       (name in labels and code_at(labels[name]))
+                                       for name in names)]
+        if not work:
+            return self._offsets
+        addr, size, seg = self.layout()
+        # Each run of code of known size: the first line at each address in
+        # it, and the lines that have bytes, with their addresses.  Made
+        # when first needed.
+        first: dict[tuple[int, int], int] = {}
+        runs: dict[int, list[tuple[int, int]]] = {}
+        bases: dict[int, list[int]] = {}
+
+        def tables() -> None:
+            if not first:
+                for j in range(n):
+                    first.setdefault((seg[j], addr[j]), j)
+                    if size[j]:
+                        runs.setdefault(seg[j], []).append((addr[j], j))
+                bases.update({s: [a for a, _ in lines] for s, lines in runs.items()})
+
+        def base(expr: str, here: int, depth: int = 0) -> tuple[int, int] | None:
+            """``expr`` as (line, offset), where it is NAME, NAME+N or NAME-N
+            of a label, ``$`` or an alias of one; None otherwise."""
+            flat = re.sub(r"\s*([+-])\s*", r"\1", expr.strip())
+            while flat.startswith("(") and flat.endswith(")") and _balanced_outer(flat):
+                flat = flat[1:-1].strip()
+            m = re.fullmatch(r"([A-Za-z_?@$.][\w?@$.]*)(?:([+-])([\w?@$.]+))?", flat)
+            if not m or depth > 20:
+                return None
+            k = 0
+            if m.group(2):
+                v = parse_number(m.group(3), self.radix)
+                if v is None:
+                    v = self.equ.get(m.group(3))
+                if v is None:
+                    return None
+                k = -v if m.group(2) == "-" else v
+            name = m.group(1).lower()
+            if name == "$":
+                return here, k
+            if name in labels:
+                return labels[name], k
+            if name in self.aliases:
+                text, where = self.aliases[name]
+                got = base(text, where, depth + 1)
+                return None if got is None else (got[0], got[1] + k)
+            return None
+
+        def reach(b: int, k: int, kind: str) -> None:
+            """Code line ``b`` + ``k`` bytes reaches, used as ``kind``:
+            "goto" (a jump or call there), "value" or "load"."""
+            tables()
+            s, a = seg[b], addr[b] + k
+            lines = runs.get(s, [])
+            starts = bases.get(s, [])
+            if not lines or not starts[0] <= a <= starts[-1] + size[lines[-1][1]]:
+                everything(b)
+                return
+            lo = min(addr[b], a)
+            hi = max(addr[b], a if kind == "goto" else a + 2)
+            for _, j in lines[max(0, bisect_right(starts, lo) - 1):bisect_left(starts, hi)]:
+                if addr[j] + size[j] > lo and effects[j] is not None and \
+                        effects[j].flow != "data":
+                    frozen.add(j)
+            if kind != "load" and (s, a) in first:
+                entries.add(first[(s, a)])
+
+        def everything(b: int) -> None:
+            tables()
+            for _, j in runs.get(seg[b], []):
+                if effects[j] is not None and effects[j].flow != "data":
+                    frozen.add(j)
+                    entries.add(j)
+
+        done: set[tuple[str, int, str]] = set()
+        for idx, text, kind, names in work:
+            key = (text.lower(), idx if "$" in names else -1, kind)
+            if key in done:
+                continue
+            done.add(key)
+            got = base(text, idx)
+            if got is not None:
+                # A load from code reads, or patches, an instruction.
+                if code_at(got[0]) and (got[1] or kind == "load"):
+                    reach(got[0], got[1], kind)
+                continue
+            if re.fullmatch(r"(?i)\s*(low|high)\s*\(?\s*[A-Za-z_?@$.][\w?@$.]*\s*\)?\s*", text):
+                continue  # the bytes of an address, not another
+            for name in names:
+                b = idx if name == "$" else labels.get(name)
+                if b is not None and code_at(b):
+                    everything(b)
+        return self._offsets
+
+    def _vectors(self, labels: dict[str, int], entries: set[int], frozen: set[int]) -> None:
+        """The ``jp`` instructions after a label the text exports: a vector
+        of jumps another module may enter at an offset (_offsets_found)."""
+        effects = self.effects
+        for name in self.exported | self.public:
+            b = labels.get(name)
+            if b is None:
+                continue
+            for j in range(b, len(effects)):
+                eff = effects[j]
+                if eff is None or (eff.size == 0 and eff.flow == "next"):
+                    continue
+                if eff.flow != "jump" or _split(self.lines[j])[1] != "jp" or \
+                        eff.target is None:
+                    break
+                frozen.add(j)
+                entries.add(j)
 
     def live(self, starts: list[int], resources: frozenset[str] | set[str]) -> bool:
         """May any of ``resources``, as they are at the lines ``starts``, be
@@ -1987,7 +2208,7 @@ class PeepholeOptimizer:
                     # Check if this is a label line
                     if self._is_label_line(lines[j]):
                         label = next_line.split(":")[0].strip()
-                        if label == target:
+                        if label == target and i not in code.frozen:
                             # JP to next label - remove the JP
                             self.stats["jump_to_next"] = self.stats.get("jump_to_next", 0) + 1
                             changed = True
@@ -2012,6 +2233,8 @@ class PeepholeOptimizer:
                     continue
                 if pattern.condition and not pattern.condition(instrs):
                     continue
+                if not code.frozen.isdisjoint(instruction_lines):
+                    continue  # an address computed from a label depends on it
                 if not self._clobbers_dead(code, pattern, instrs, instruction_lines):
                     continue
                 # Jumped to, a routine finds its caller's return address
@@ -2104,6 +2327,8 @@ class PeepholeOptimizer:
         i = 0
         while i < len(lines):
             rewrite = self._z80_rewrite(lines, code, i)
+            if rewrite is not None and not code.frozen.isdisjoint(range(i, rewrite[1])):
+                rewrite = None  # an address computed from a label depends on it
             if rewrite is not None:
                 new_lines, i, stat = rewrite
                 result.extend(new_lines)
@@ -2308,7 +2533,8 @@ class PeepholeOptimizer:
                 if w is not None:
                     idxs, ins, skipped, j = w
                     parts = split_operands(ins[1][1])
-                    if ins[1][0] in ("jp", "jr") and len(parts) == 2 and parts[0].lower() == "nz":
+                    if ins[1][0] in ("jp", "jr") and len(parts) == 2 and \
+                            parts[0].lower() == "nz" and code.frozen.isdisjoint(idxs):
                         t = code.target(parts[1])
                         if t is not None and code.reaches(idxs[0], idxs[1], t) and \
                                 not code.live([t, idxs[1] + 1], FLAGS_NO_C):
@@ -2323,7 +2549,8 @@ class PeepholeOptimizer:
                 parts = split_operands(operands)
                 cond = parts[0].lower() if len(parts) == 2 else None
                 target = parts[-1] if parts else ""
-                if (cond is None or cond in JR_CONDITIONS) and len(parts) in (1, 2):
+                if (cond is None or cond in JR_CONDITIONS) and len(parts) in (1, 2) and \
+                        i not in code.frozen:
                     t = code.target(target)
                     if t is not None and code.reaches(i, i, t):
                         result.append(f"\tjr {cond},{target}" if cond else f"\tjr {target}")
@@ -2444,7 +2671,8 @@ class PeepholeOptimizer:
             if self._is_label_line(line):
                 label, op, _ = _split(line)
                 if label is not None and label in label_target and refs.get(label.lower(), 0) == 0 and \
-                        not self._falls_through(final_result):
+                        not self._falls_through(final_result) and \
+                        not self._frozen_jump(code, result, i):
                     changed = True
                     self.stats["dead_label_removed"] = self.stats.get("dead_label_removed", 0) + 1
                     i += 1
@@ -2468,6 +2696,16 @@ class PeepholeOptimizer:
             i += 1
 
         return final_result, changed
+
+    def _frozen_jump(self, code: _Code, lines: list[str], i: int) -> bool:
+        """Is the jump that the label on line ``i`` stands before one that
+        an address computed from a label depends on?"""
+        for j in range(i, len(lines)):
+            if j in code.frozen:
+                return True
+            if j > i and (self._is_label_line(lines[j]) or self._parse_line(lines[j])):
+                return False
+        return False
 
     def _falls_through(self, done: list[str]) -> bool:
         """Can control run off the end of ``done`` into what follows?"""
@@ -2516,6 +2754,7 @@ class PeepholeOptimizer:
         result: list[str] = []
         changed = False
         storage: _Storage | None = None
+        frozen: set[int] = set()
         i = 0
 
         while i < len(lines):
@@ -2534,7 +2773,8 @@ class PeepholeOptimizer:
                         addr = parsed[1][1:-3]  # Extract addr from (addr),a
                         if storage is None:
                             storage = _Storage(lines)
-                        if storage.unread(i + 1, addr):
+                            frozen = _Code(lines).frozen
+                        if storage.unread(i + 1, addr) and i + 1 not in frozen:
                             result.append(line)  # Keep the label
                             i += 2  # Skip the store instruction
                             changed = True

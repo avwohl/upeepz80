@@ -448,3 +448,49 @@ def test_a_routine_whose_callee_takes_its_return_address_goes_anywhere():
            "P:\n\tpop hl\n\tex (sp),hl\n\tld (W),hl\n\tld hl,0\n\tret\n")
     out = assert_equivalent(src)
     assert "ld a,0" in instrs(out), out
+
+
+# ---- Code an address computed from a label reaches ----------------------------
+
+@pytest.mark.parametrize("way", [
+    "QQ:\n\tpush bc\n\tld hl,LL+3\n\tjp (hl)\nLL:\n\tjp 0\n\tcall SHOWP\n\tret\n",
+    "QQ:\n\tpush bc\n\tjp LL+3\nLL:\n\tjp 0\n\tcall SHOWP\n\tret\n",
+    "QQ:\n\tpush bc\n\tld hl,LL+3\n\tpush hl\n\tret\nLL:\n\tjp 0\n\tcall SHOWP\n\tret\n",
+    "QQ:\n\tpush bc\n\tjr $+3\n\tret\n\tcall SHOWP\n\tret\n",
+    # the second entry of a table of jumps
+    "QQ:\n\tpush bc\n\tld hl,TBL+3\n\tjp (hl)\nTBL:\n\tjp E0\n\tjp E1\nE0:\n\tret\nE1:\n"
+    "\tcall SHOWP\n\tret\n",
+])
+def test_no_tail_call_in_code_an_address_computed_from_a_label_reaches(way):
+    """QQ pushes SHOWP's argument, and goes on to code that only an
+    address computed from a label reaches, which counted as reached by
+    nothing, so `call SHOWP / ret' became `jp SHOWP'."""
+    out = assert_equivalent(SHOWP_MAIN + way, entry=SHOWP)
+    assert "call SHOWP" in instrs(out), out
+
+
+BIOS_CALLER = ("\tjp START\nSTART:\n\tcall BIOS+3\n\tld (V),a\n\tcall BIOS+6\n\tld (W),a\n"
+               "\tcall BIOS\n\tjp 0\n")
+
+
+@pytest.mark.parametrize("src", [
+    "BIOS::\tjp BOOT\n\tjp WBOOT\n\tjp CONST\n",
+    "BIOS::\n\tjp BOOT\nWBE:\tjp WBOOT\nCSE:\tjp CONST\n",
+    "\tpublic BIOS\nBIOS:\tjp BOOT\n\tjp WBOOT\n\tjp CONST\n",
+])
+def test_a_vector_of_jumps_another_module_enters_at_an_offset_keeps_its_size(src):
+    """Another module calls BIOS+3 and BIOS+6.  The jumps became `jr',
+    two bytes each, or all but the first were removed as jumps nothing
+    names."""
+    src += "BOOT:\n\tld a,1\n\tret\nWBOOT:\n\tld a,2\n\tret\nCONST:\n\tld a,3\n\tret\n"
+    out = assert_equivalent(src, entry=BIOS_CALLER)
+    assert [line for line in instrs(out) if line.endswith("jp WBOOT")], out
+
+
+def test_code_between_a_label_and_an_address_computed_from_it_keeps_its_size():
+    """LB+2 is the `jp MM' after `ld a,0'.  `ld a,0' became `xor a', a
+    byte, and `jp MM' went, as a jump to the next line: LB+2 was then past
+    `cp b'."""
+    src = "\tld hl,LB+2\n\tjp (hl)\nLB:\n\tld a,0\n\tjp MM\nMM:\n\tcp b\n\tld hl,0\n\tret\n"
+    out = assert_equivalent(src)
+    assert instrs(out)[2:4] == ["ld a,0", "jp MM"], out
