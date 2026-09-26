@@ -335,13 +335,15 @@ class _Routines:
     text's or another's: ``jp (hl)``, ``jp (ix)``, ``jp (iy)``, a ``ret``
     that does not take the return address (``push hl / ret``), ``reti``,
     ``retn``, ``halt``, data, a directive or an instruction not recognised,
-    and a jump or call to an address of this text that is not one of its
+    a jump or call to an address of this text that is not one of its
     labels as written (``jp ALIAS`` where ``ALIAS equ RTN``, ``call rtn``,
-    ``jp $+3``: see :meth:`_Code.unfollowed`).  That code may take its
-    caller's return address off the stack, or change it through a pointer,
-    so the routine is not regular; and it may read above its return
-    address, so it peeks.  The code it goes to is entered from anywhere, as
-    a label that something names is.
+    ``jp $+3``: see :meth:`_Code.unfollowed`), and an instruction the
+    program may write another over (:attr:`_Code.patched`), which may also
+    go on to the line after it (``ret`` made ``nop``).  That code may take
+    its caller's return address off the stack, or change it through a
+    pointer, so the routine is not regular; and it may read above its
+    return address, so it peeks.  The code it goes to is entered from
+    anywhere, as a label that something names is.
 
     Where code goes on like that with something on the stack other than the
     return address it was entered with - where that is not at the top of
@@ -382,6 +384,11 @@ class _Routines:
             if name.lower() in named or name.lower() in code.exported or \
                     code.labels.get(name) is None:
                 open_roots.add(idx)
+        # An instruction the program may write another over may become
+        # anything, and go on to the line after it (`ret' or `jr' made
+        # `nop'), where the text does not: as after data.
+        for idx in code.patched:
+            open_roots.add(idx + 1)
         for idx, eff in enumerate(effects):
             if eff is not None and eff.flow in ("stop", "data"):
                 open_roots.add(idx + 1)
@@ -440,7 +447,7 @@ class _Routines:
         for i, eff in enumerate(effects):
             if eff is None:
                 continue
-            if eff.flow in ("stop", "data"):
+            if eff.flow in ("stop", "data") or i in code.patched:
                 gone.add(i)
             elif eff.flow == "return":
                 exits.add(i)
@@ -581,6 +588,9 @@ class _Routines:
             if eff is None or not (self.open[i] or self.entries[i]):
                 return False
             h = self.height[i]
+            if i in code.patched:
+                # It may become anything, and go on with what is pushed.
+                return h is None or h not in places[i]
             if eff.flow == "return" or (eff.flow == "stop" and _split(code.lines[i])[1] in
                                         ("reti", "retn")):
                 if self.returns(i):
@@ -1062,19 +1072,28 @@ class _Code:
 
     def _vectors(self, labels: dict[str, int], entries: set[int], frozen: set[int],
                  patched: set[int]) -> None:
-        """The ``jp`` and ``jr`` instructions after a label that the text
-        names other than as where a jump or call goes, or exports, and the
-        padding between them (``nop``, ``db``, ``ds``): a table of jumps
-        that may be entered at an offset computed at run time, or a vector
-        of them that another module may enter so, and patch
-        (_offsets_found)."""
+        """The ``jp`` and ``jr`` instructions after a label (or a name an
+        ``equ`` sets to ``$``: ``TABLE equ $``) that the text names other
+        than as where a jump or call goes, or exports, and the padding
+        between them (``nop``, ``db``, ``ds``): a table of jumps that may
+        be entered at an offset computed at run time, or a vector of them
+        that another module may enter so, and patch (_offsets_found)."""
         effects = self.effects
         exported = self.exported | self.public
+        # The lines each kind of run has been over: what a run does from a
+        # line on does not depend on where it began.
+        done: dict[bool, set[int]] = {False: set(), True: set()}
         for name in self.named | exported:
             b = labels.get(name)
+            if b is None and name in self.aliases and self.aliases[name][0].strip() == "$":
+                b = self.aliases[name][1]  # `TABLE equ $'
             if b is None:
                 continue
+            seen = done[name in exported]
             for j in range(b, len(effects)):
+                if j in seen:
+                    break
+                seen.add(j)
                 eff = effects[j]
                 if eff is None or (eff.size == 0 and eff.flow == "next"):
                     continue

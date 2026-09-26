@@ -8,15 +8,16 @@ are well established); the undocumented bits 3 and 5 of F are not modelled
 and should be masked off when comparing.
 
 Symbols name addresses: pass ``symbols={"V0": 0x8000, ...}``.  ``equ`` lines
-in the source are honoured.  The data the source defines (``ds``, ``db``,
-``dw``) is laid out from DATA_BASE on as an assembler lays it out, one line
-after another.  The instructions are laid out from CODE_BASE on, each as
-long as the Z80's encoding of it, so that an address computed from a label
-of code (``BIOS+3``, ``$+3``) is where the assembler puts that byte; data
-takes no room among them.  A ``call`` to a label in the source pushes a
-return address and goes there; a ``ret`` with nothing of ours on the stack
-ends the run, as do ``halt``, ``jp 0`` and running off the end.  A jump or
-return to an address that is not where an instruction starts is an error.
+in the source are honoured, and ``$`` in one is where the next instruction
+is.  The data the source defines (``ds``, ``db``, ``dw``) is laid out from
+DATA_BASE on as an assembler lays it out, one line after another.  The
+instructions are laid out from CODE_BASE on, each as long as the Z80's
+encoding of it, so that an address computed from a label of code
+(``BIOS+3``, ``$+3``) is where the assembler puts that byte; data takes no
+room among them.  A ``call`` to a label in the source pushes a return
+address and goes there; a ``ret`` with nothing of ours on the stack ends the
+run, as do ``halt``, ``jp 0`` and running off the end.  A jump or return to
+an address that is not where an instruction starts is an error.
 """
 
 from __future__ import annotations
@@ -200,7 +201,7 @@ class Machine:
         self.lines: list[tuple[str, list[str]] | None] = []
         self.labels: dict[str, int] = {}
         self.symbols = {k.lower(): v for k, v in (symbols or {}).items()}
-        equates: list[tuple[str, str]] = []
+        equates: list[tuple[str, str, int]] = []
         for idx, raw in enumerate(source.split("\n")):
             text = strip_comment(raw)
             if not text.strip():
@@ -217,7 +218,7 @@ class Machine:
                     # NAME equ VALUE
                     parts = body.split(None, 1)
                     if parts and parts[0].lower() in ("equ", "defl", "set"):
-                        equates.append((label.lower(), parts[1]))
+                        equates.append((label.lower(), parts[1], idx))
                         self.lines.append(None)
                         continue
                     raise SimError(f"cannot parse {raw!r}")
@@ -227,7 +228,7 @@ class Machine:
                 op = parts[0].lower()
                 ops = split_operands(parts[1]) if len(parts) > 1 else []
                 if op in ("equ", "defl") and label:
-                    equates.append((label.lower(), ops[0]))
+                    equates.append((label.lower(), ops[0], idx))
                     self.lines.append(None)
                     continue
                 self.lines.append((op, ops))
@@ -239,7 +240,8 @@ class Machine:
                 self.labels[label.lower()] = idx
         self._lay_out_data()
         self._lay_out_code()
-        for name, expr in equates:
+        for name, expr, idx in equates:
+            self.pc = idx  # `$' is where the equate is: the next instruction
             self.symbols[name] = self.eval(expr)
         self.mem = bytearray(0x10000)
         self.r = {k: 0 for k in R8}

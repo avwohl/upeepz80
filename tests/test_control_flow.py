@@ -1,6 +1,8 @@
 """Tail calls, labels and jump threading keep every way control can go;
 and the other rewrites that were wrong whatever was live afterwards."""
 
+import time
+
 import pytest
 
 from upeepz80 import optimize
@@ -14,6 +16,15 @@ def test_the_interpreter_jumps_to_a_name_an_equate_sets_to_code():
     there, as it does on an assembler."""
     src = "\tcall ALIAS\n\tjp ALIAS\nALIAS\tequ RTN\nRTN:\n\tinc a\n\tret\n"
     m = Machine(src)
+    m.r["a"] = 1
+    assert m.run() == "ret"
+    assert m.r["a"] == 3
+
+
+def test_the_interpreter_takes_dollar_in_an_equate_for_the_next_instruction():
+    """`TABLE equ $' names the address of the instruction after it, as on
+    an assembler: TABLE+2 is the `inc a' after `jr X'."""
+    m = Machine("\tjp TABLE+2\nTABLE\tequ $\n\tjr X\n\tinc a\nX:\n\tinc a\n\tret\n")
     m.r["a"] = 1
     assert m.run() == "ret"
     assert m.r["a"] == 3
@@ -480,6 +491,7 @@ JP_ENTRIES = "\tjp H0\n\tjp H1\nH0:\n\tpop bc\n\tret\nH1:\n\tcall SHOWP\n\tret\n
     JP_TABLE + "TABLE:\n" + JP_ENTRIES,
     JP_TABLE.replace("ld de,TABLE", "ld de,table") + "TABLE:\n" + JP_ENTRIES,
     JP_TABLE.replace("ld de,TABLE", "ld de,TB") + "TB\tequ TABLE\nTABLE:\n" + JP_ENTRIES,
+    JP_TABLE + "TABLE\tequ $\n" + JP_ENTRIES,
     JP_TABLE.replace("ld de,TABLE", "ld de,(TP)") + "TP:\tdw TABLE\nTABLE:\n" + JP_ENTRIES,
     JP_TABLE + "TABLE:\t; the table\n\n\tjp H0\n; the second entry\nT1:\tjp H1\n"
     "H0:\n\tpop bc\n\tret\nH1:\n\tcall SHOWP\n\tret\n",
@@ -539,6 +551,22 @@ def test_a_vector_of_jumps_another_module_enters_at_an_offset_keeps_its_size(src
     src += "BOOT:\n\tld a,1\n\tret\nWBOOT:\n\tld a,2\n\tret\nCONST:\n\tld a,3\n\tret\n"
     out = assert_equivalent(src, entry=BIOS_CALLER)
     assert [line for line in instrs(out) if line.endswith("jp WBOOT")], out
+
+
+def test_a_long_run_of_named_data_is_looked_at_once():
+    """Where the text names a label, the jumps after it, and what pads
+    them, are a table.  They were looked for from each such label on, over
+    the data after it, which may pad a table, to the end of the run: over
+    8,000 labels of data in a row that a table of words names, that was 32
+    million lines, and optimize() took 3.9 seconds of CPU time.  A line is
+    now looked at once, and it takes 0.14."""
+    names = [f"M{k}" for k in range(8000)]
+    src = ("\tld hl,TBL0\n\tret\n" +
+           "".join(f"TBL{k}:\tdw {','.join(names[k:k + 16])}\n" for k in range(0, 8000, 16)) +
+           "".join(f"{name}:\tdb 'x',0\n" for name in names))
+    start = time.process_time()
+    optimize(src)
+    assert time.process_time() - start < 1.0
 
 
 def test_code_between_a_label_and_an_address_computed_from_it_keeps_its_size():
@@ -671,3 +699,77 @@ def test_liveness_reads_everything_at_an_instruction_the_program_patches(patch):
            "SUB:\n\tld a,0\nSW:\n\tor a\n\tret\n")
     out = instrs(optimize(src))
     assert out[out.index("or a") - 1] == "ld a,0", out
+
+
+# ---- Code an instruction the program writes over goes on into -----------------
+#
+# The program may write over an instruction so that it goes on to the line
+# after it, where the text jumps or returns: `ret' made `nop' (0) or `ret nz'
+# (0C0h), `jp' made three `nop's, `jp nz' (0C2h) or `ld hl,nn' (21h, which
+# skips the operand, as 8080 code does), `jr' made two `nop's or given a
+# displacement of 0.  z80sim does not put the bytes of code in memory: these
+# run the code as the program makes it (assert_equivalent's `patch').
+
+# QQ pushes SHOWP's argument, and SW goes to SKIP, which takes it off; the
+# program writes over SW, so that QQ goes on to `call SHOWP / ret'.
+FALL = ("START:\n{patch}\tld bc,5A5Ah\n\tcall QQ\n\tld hl,0\n\tld de,0\n\tjp 0\n"
+        "QQ:\n\tpush bc\n{before}SW:\n\t{sw}\n{between}\tcall SHOWP\n\tret\n"
+        "SKIP:\n\tpop bc\n\tret\n")
+
+
+@pytest.mark.parametrize("sw, patch, becomes, before, between", [
+    # three `nop's over `jp'
+    ("jp SKIP", "\tld hl,0\n\tld (SW+1),hl\n\txor a\n\tld (SW),a\n", "nop\n\tnop\n\tnop", "", ""),
+    ("jp SKIP", "\tld hl,0\n\tld (SW),hl\n\txor a\n\tld (SW+2),a\n", "nop\n\tnop\n\tnop", "",
+     "\tld a,1\n"),
+    # two `nop's over `jr'
+    ("jr SKIP", "\tld hl,0\n\tld (SW),hl\n", "nop\n\tnop", "", ""),
+    # `jr' to the next line
+    ("jr SKIP", "\txor a\n\tld (SW+1),a\n", "jr $+2", "", "\tld a,1\n"),
+    # `jp' made `ld hl,nn'
+    ("jp SKIP", "\tld a,21h\n\tld (SW),a\n", "ld hl,SKIP", "", ""),
+    # `jp' made `jp nz', where Z is set
+    ("jp SKIP", "\tld a,0C2h\n\tld (SW),a\n", "jp nz,SKIP", "\txor a\n", ""),
+    # `ret' made `nop'
+    ("ret", "\txor a\n\tld (SW),a\n", "nop", "", "\tld a,1\n"),
+])
+def test_no_tail_call_in_code_an_instruction_the_program_writes_over_goes_on_into(
+        sw, patch, becomes, before, between):
+    """`call SHOWP / ret' counted as reached by nothing, and became `jp
+    SHOWP', with QQ's argument still pushed: SHOWP took QQ's return address
+    for it.  (Where SW's bytes, or the word the program writes, reach the
+    line after SW, that line was already left as it was.)"""
+    src = FALL.format(patch=patch, sw=sw, before=before, between=between)
+    out = assert_equivalent(src, entry=SHOWP, patch={"SW": becomes})
+    assert "call SHOWP" in instrs(out), out
+
+
+def test_no_tail_call_after_a_jump_of_an_exported_vector():
+    """Another module may write over a jump after a label the text exports:
+    here three `nop's over HOOK's `jp SKIP', and QQ goes on to `call SHOWP /
+    ret' with SHOWP's argument pushed, as above."""
+    src = SHOWP_MAIN + "QQ:\n\tpush bc\nHOOK::\n\tjp SKIP\n\tcall SHOWP\n\tret\nSKIP:\n\tpop bc\n\tret\n"
+    entry = "\tld hl,0\n\tld (HOOK+1),hl\n\txor a\n\tld (HOOK),a\n" + SHOWP
+    out = assert_equivalent(src, entry=entry, patch={"HOOK": "nop\n\tnop\n\tnop"})
+    assert "call SHOWP" in instrs(out), out
+
+
+# START pushes a word and calls QQ, which calls HOOK; the program writes over
+# HOOK's `ret', and HOOK goes on to read the word above its return address.
+HOOK = ("START:\n{patch}\tld bc,1234h\n\tpush bc\n\tcall QQ\n\tpop bc\n\tld hl,0\n\tld de,0\n"
+        "\tjp 0\nQQ:\n{before}\tcall HOOK\n\tret\nHOOK:\n\tret\n\tpop hl\n\tpop de\n\tpush de\n"
+        "\tpush hl\n\tld a,d\n\tld (V),a\n\tret\n")
+
+
+@pytest.mark.parametrize("patch, becomes, before", [
+    ("\txor a\n\tld (HOOK),a\n", "nop", ""),
+    # `ret nz', where Z is set
+    ("\tld a,0C0h\n\tld (HOOK),a\n", "ret nz", "\txor a\n"),
+])
+def test_no_tail_call_to_a_routine_whose_ret_the_program_writes_over(patch, becomes, before):
+    """HOOK counted as a routine that returns to its call, and `call HOOK /
+    ret' became `jp HOOK': jumped to, HOOK read START's return address
+    where it had read the word START pushed."""
+    src = HOOK.format(patch=patch, before=before)
+    out = assert_equivalent(src, patch={"HOOK": becomes})
+    assert "call HOOK" in instrs(out), out
