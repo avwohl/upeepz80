@@ -140,24 +140,28 @@ other than it found it; nor where a jump or `ret` the optimizer cannot
 follow (`push bc / ld hl,HND / jp (hl)`, `ex (sp),hl / ret`) may have
 entered the routine with something pushed.
 
-A program that computes an address from a label - `jp BIOS+3`, `ld
-hl,L+3`, `jr $+3`, `dw START-3` - depends on the size of the code between,
-and may go to the code there. No rewrite changes that code, and the code at
-the address is taken to be entered from anywhere. So it is with the `jp`
-and `jr` instructions, and any `nop`, `db` or `ds` that pads them (`jp H0 /
-nop / jp H1 / nop`), after a label the text names other than as where a
-jump or call goes, a table the program may enter at an offset it computes
-(`ld de,TBL / add hl,de / jp (hl)`), and after a label the text exports,
-which another module may enter at an offset, as a BIOS's jump vector is.
-Where the program may read or write the code at the address (`ld
-hl,(VEC+1)`, `ld (VEC+1),hl`, `ld (SW),a`), the instruction there may have
-been patched: a path that goes there counts as reading everything, whatever
-the instruction; a jump or call there, or in an exported vector, is taken
-to go where the optimizer cannot follow, and no jump is threaded through
-it. A `dw L`, where L is `jp M`, becomes `dw M` only in a table
-that is only jumped through, as uplm80's `DO CASE` tables are, and where
-the code at M reads neither HL, which holds L or M, nor DE, which points at
-the entry.
+A program that computes an address from a label - `jp BIOS+3`, `ld hl,L+3`,
+`jr $+3`, `dw START-3` - depends on the size of the code between, and may go
+to the code there. No rewrite changes that code, and the code at the address
+is taken to be entered from anywhere. So it is with the `jp` and `jr`
+instructions, and any `nop`, `db` or `ds` that pads them (`jp H0 / nop / jp
+H1 / nop`), after a label the text names other than as where a jump or call
+goes, or a name an `equ` sets to `$` there (`TBL equ $`), a table the
+program may enter at an offset it computes (`ld de,TBL / add hl,de / jp
+(hl)`), and after a label the text exports, which another module may enter
+at an offset, as a BIOS's jump vector is. Where the program may read or
+write the code at the address (`ld hl,(VEC+1)`, `ld (VEC+1),hl`, `ld
+(SW),a`), the instruction there may have been patched into any other: a path
+that goes there counts as reading everything, whatever the instruction; that
+instruction, and a jump of an exported vector, is taken to go where the
+optimizer cannot follow, or on to the line after it (a `ret` made `nop`, a
+`jp` made `ld hl,nn`), which may then be entered from anywhere; and no jump
+is threaded through it. No tail call is made to a routine that reaches it,
+nor, where something may be pushed there, in code that may be entered from
+anywhere. A `dw L`, where L is `jp M`, becomes `dw M` only in a table that
+is only jumped through, as uplm80's `DO CASE` tables are, and where the code
+at M reads neither HL, which holds L or M, nor DE, which points at the
+entry.
 
 Numbers are read under the text's radix. Where it sets a `.radix` other than
 ten, only numbers that mean the same under any radix are rewritten.

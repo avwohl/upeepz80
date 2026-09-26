@@ -94,16 +94,22 @@ off the stack gains 165 bytes; the fixes below cost 21. `optimize()` takes
   H0 / nop / jp H1 / nop / jp H2 / nop` (or `db 0`, `ds 1`), past its first
   entry: `jp H1` became `jr H1`, so that TBL+8 was inside `jp H2`, and H2
   counted as reached by nothing. In a table of `jr`, `TBL: jr H0 / jr H1`,
-  H1 did. The program can compute an address at run time only from a label
-  it names, and another module only from one the text exports; what either
-  does with it the optimizer cannot know. A label that `jp` or `jr`
+  H1 did. So it was with a table that an `equ` names, `TBL equ $`, rather
+  than a label. The program can compute an address at run time only from a
+  label it names, and another module only from one the text exports; what
+  either does with it the optimizer cannot know. A label that `jp` or `jr`
   instructions follow is the table, or the vector. The `jp` and `jr`
   instructions after a label the text names other than as where a jump or
   call goes (`ld de,TBL`, `dw TBL`, `TB equ TBL`, `jp TBL+3`), or exports
-  (`NAME::`, `public`, `global`, `entry`), and any `nop`, `db`, `defb`, `ds`
-  or `defs` between them, are now left as they are, and each jump may be
-  entered from anywhere. On the corpus this costs 2 bytes, one in each build
-  of PIP: the arm `jp @PUTDCHAR$LSTL`, whose label a `DO CASE` table names,
+  (`NAME::`, `public`, `global`, `entry`), or after a name that an `equ`
+  sets to `$` and the text so names or exports (`TBL equ $`), and any `nop`,
+  `db`, `defb`, `ds` or `defs` between them, are now left as they are, and
+  each jump may be entered from anywhere. Each line is looked at once for
+  them, however many such labels come before it, so that a long run of named
+  data, which may pad a table, does not take time in proportion to the
+  square of its length: 8,000 named labels of `db` in a row take about as
+  long as on 0.2.6. On the corpus this costs 2 bytes, one in each build of
+  PIP: the arm `jp @PUTDCHAR$LSTL`, whose label a `DO CASE` table names,
   stays `jp`. No exported label there is followed by a `jp`.
 - **A jump whose operand the program reads or writes was given another, and
   taken to go where it named,** as 0.2.5 and 0.2.6 do. With `VEC: jp
@@ -118,19 +124,36 @@ off the stack gains 165 bytes; the fixes below cost 21. `optimize()` takes
   writes another over seen as anything but what the text says: with `ld
   a,0C9h / ld (SW),a`, `SUB: ld a,0 / SW: or a / ret` returns with the carry
   its caller set, which the caller reads, but liveness took `or a` to write
-  it first, and `ld a,0` became `xor a`. Now jump threading gives no jump
+  it first, and `ld a,0` became `xor a`. Nor was it seen that the
+  instruction may go on to the line after it, where the text jumps or
+  returns: after `ld hl,0 / ld (SW+1),hl / xor a / ld (SW),a`, `SW: jp SKIP`
+  is three `nop`s, and QQ, which has pushed SHOWP's argument, goes on from
+  it to `call SHOWP / ret`, which counted as reached by nothing and became
+  `jp SHOWP`. So with `jp` made `jp nz` (0C2h) or `ld hl,nn` (21h, which
+  skips the operand, as 8080 code does), `jr` made two `nop`s or given a
+  displacement of 0, and `ret` made `nop`. And a routine whose `ret` the
+  program writes over counted as one that returns to its call: with `xor a /
+  ld (HOOK),a`, or `ld a,0C0h / ld (HOOK),a` for `ret nz` where Z is set,
+  `HOOK: ret` goes on to code that reads the word above its return address,
+  and `call HOOK / ret` became `jp HOOK`. Now jump threading gives no jump
   that an address computed from a label reaches another operand. And an
   instruction at an address that is not only jumped to - where a load, a
   store or a pointer may reach (`ld hl,(VEC+1)`, `ld (VEC+1),hl`, `ld
-  (SW),a`, `ld hl,VEC+1`) - may be patched. Liveness reads everything there,
-  whatever the instruction; a jump or call there goes where the optimizer
-  cannot follow, as `jp (hl)` does. No jump, and no `dw` of a table, is
-  threaded through it; a routine whose code reaches a jump or call there is
-  not regular, so no tail call is made to it; and the label it names may be
-  entered from anywhere. So it is with each `jp` of a vector the text
-  exports, which another module may patch, and with every instruction of a
-  run of code where an address in it cannot be worked out. Nothing changes
-  on the corpus.
+  (SW),a`, `ld hl,VEC+1`) - may be patched, and become any instruction.
+  Liveness reads everything there, whatever the instruction; a jump or call
+  there goes where the optimizer cannot follow, as `jp (hl)` does; so may
+  any other instruction there, or it may go on to the line after it, as data
+  may. No jump, and no `dw` of a table, is threaded through it; a routine
+  whose code reaches it is not regular, so no tail call is made to it, and
+  the height after a call of it is not known; the line after it, and the
+  label a jump or call there names, may be entered from anywhere; and where
+  what is at the top of the stack there may not be the return address its
+  code was entered with, the code it goes on to may be entered with
+  something pushed, so no tail call is made in code that may be entered from
+  anywhere. So it is with each `jp` of a vector the text exports, which
+  another module may patch, and with every instruction of a run of code
+  where an address in it cannot be worked out. Nothing changes on the
+  corpus.
 - **`dw L`, where L is `jp M`, became `dw M`,** as in 0.2.5 and 0.2.6. A
   word that holds the address of code was taken to be an address that is
   only jumped to; a program that compares it, or keeps it, sees another
@@ -178,7 +201,12 @@ off the stack gains 165 bytes; the fixes below cost 21. `optimize()` takes
   there, and a jump or return to an address goes to the instruction there.
   `tests/test_z80_model.py`: its sizes are um80's. `tests/_equiv.py`'s
   `assert_equivalent` can leave bytes out of the comparison (`ignore`),
-  such as a table of addresses of code, which the optimizer may change.
+  such as a table of addresses of code, which the optimizer may change,
+  and run code as the program makes it by writing over an instruction
+  (`patch`): z80sim does not put the bytes of code in memory, so the
+  instruction after a label is replaced, before and after optimization,
+  and the optimizer must keep it. z80sim takes `$` in an `equ` for where
+  the next instruction is (`TBL equ $`).
 - `tests/test_control_flow.py`: the tail call to SHOWP after each `ret`
   above that may not go back (four ways), to SUBR, after each of the five
   ways to code that address arithmetic reaches, the vector entered at
@@ -196,8 +224,14 @@ off the stack gains 165 bytes; the fixes below cost 21. `optimize()` takes
   (six, which ask that it stays: 0.2.6 removes it, as a jump to the next
   line), the patched jump and call that liveness followed, the `or a` the
   program writes `ret` or `nop` over (three ways), and the table padded
-  with data (four ways) look at the code instead, and fail on 0.2.6. 44 of
-  the 394 tests fail on 0.2.6.
+  with data (four ways) look at the code instead, and fail on 0.2.6. So
+  do, run as the program patches them, the code that QQ goes on into with
+  SHOWP's argument pushed from a `jp`, `jr` or `ret` that the program
+  writes over (seven ways), or from a `jp` of a vector that another module
+  writes over; HOOK, whose `ret` the program makes `nop` or `ret nz` (two
+  ways); and the table of jumps named by `TBL equ $`. A text of 8,000
+  named labels of data in a row is optimized in under a second of CPU
+  time. 55 of the 407 tests fail on 0.2.6.
 - `tests/peepfuzz.py`: a quarter of the programs also call a routine that
   takes an argument its caller pushed off the stack, from a random stream
   of their own, so that the rest of each program is as it was. 0.2.6 and
@@ -256,8 +290,11 @@ off the stack gains 165 bytes; the fixes below cost 21. `optimize()` takes
   to an address the text gives, `ld (VEC),a`, is seen). Nor is one that
   another module computes from a label the text exports, or that the program
   computes from a label it names, other than into the `jp` and `jr`
-  instructions after the label and what pads them. From a label of data, an
-  address is taken to stay in the data it labels or point where that ends.
+  instructions after the label and what pads them (`nop`, `db` or `ds`, not
+  `halt`), or after a name that an `equ` sets to `$` (not `defl` or `set`):
+  another module that writes `nop` over the `ret` of a routine the text
+  exports is not seen. From a label of data, an address is taken to stay in
+  the data it labels or point where that ends.
 
 ## 0.2.6 - 2026-09-25
 
