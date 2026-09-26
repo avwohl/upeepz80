@@ -119,21 +119,36 @@ back, from a `ret` to every call of the routine, and through a `push` to its
 `pop`. A path that leaves what the text shows counts as reading
 everything: a call or jump to a label defined elsewhere, `call 5`, `jp 0`,
 `jp (hl)`, data, or the end of the text. So does a `ret` from a routine that
-another module may call (`public`, `NAME::`, or its address taken), or that
-takes its return address off the stack (`ex (sp),hl / ret`), or that may
-change it through a pointer made from SP (`ld hl,0 / add hl,sp / ld
-(hl),e`), or that calls a routine that goes on where the optimizer cannot
-follow (`jp (hl)`, `push hl / ret`).
+another module may call (`public`, `NAME::`, or its address taken), and one
+that may not take the return address its routine was entered with. The
+optimizer follows where that address is: through `pop`, `push` and `ex
+(sp),hl`, and the calls of routines that take their arguments off the
+stack, as under PL/M-80's calling convention, which uplm80 0.4.0 uses
+(`pop hl / ex (sp),hl`). A `ret` goes back to the call only where the
+address is at the top of the stack (not after `ex (sp),hl / ret`), where it
+may not have been changed through a pointer made from SP (`ld hl,0 / add
+hl,sp / ld (hl),e`), and where the routine has not called one that goes on
+where the optimizer cannot follow (`jp (hl)`, `push hl / ret`).
 
-`call x / ret` becomes `jp x` only where nothing is pushed since the routine
-was entered, and the routine has not moved its own return address. Jumped
-to, `x` finds on top of the stack what `call x` would have put under its
-return address. That matters to a callee that removes the arguments pushed
-for it, as under PL/M-80's calling convention, which uplm80 0.4.0 uses. Nor
-is it made where `x` is a routine of the text that takes its return address
-off the stack, reads above it, or calls one that does; nor where a jump the
-optimizer cannot follow (`push bc / ld hl,HND / jp (hl)`) may have entered
-the routine with something pushed.
+`call x / ret` becomes `jp x` only where the routine's own return address is
+at the top of the stack, as `ret` takes it. Jumped to, `x` finds on top of
+the stack what `call x` would have put under its return address. That
+matters to a callee that removes the arguments pushed for it. Nor is it made
+where `x` is a routine of the text that reaches its return address or what
+is above it, directly or through a routine it calls, or leaves the stack
+other than it found it; nor where a jump or `ret` the optimizer cannot
+follow (`push bc / ld hl,HND / jp (hl)`, `ex (sp),hl / ret`) may have
+entered the routine with something pushed.
+
+A program that computes an address from a label - `jp BIOS+3`, `ld
+hl,L+3`, `jr $+3`, `dw START-3` - depends on the size of the code between,
+and may go to the code there. No rewrite changes that code, and the code at
+the address is taken to be entered from anywhere. So it is with the `jp`
+instructions after a label the text exports, which another module may enter
+at an offset, as a BIOS's jump vector is. A `dw L`, where L is `jp M`,
+becomes `dw M` only in a table that is only jumped through, as uplm80's `DO
+CASE` tables are, and where the code at M does not read HL, which holds L
+or M.
 
 Numbers are read under the text's radix. Where it sets a `.radix` other than
 ten, only numbers that mean the same under any radix are rewritten.

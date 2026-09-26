@@ -3,6 +3,202 @@
 Notable changes to upeepz80. Releases up to 0.2.4 are described on the
 [GitHub releases page](https://github.com/avwohl/upeepz80/releases).
 
+## Unreleased
+
+The corpus below is what uplm80 0.4.0 (d8fd4ed) makes of the MP/M II and
+80un PL/M sources at `-O2`: 87 texts, of which 77 assemble. On it this
+release's code is 146 bytes smaller than 0.2.6's, 210,254 against 210,400,
+in 22 outputs. Following the returns of routines that take their arguments
+off the stack gains 165 bytes; the fixes below cost 19. `optimize()` takes
+14% more CPU time than 0.2.6's over the seven largest texts: 6.33s against
+5.56s, the median of three runs, and PIP.PLM 1.13s against 0.93s.
+
+### Fixed
+
+- **A `ret` where the stack height is not known, or from a routine that may
+  have changed its return address, was taken to go back to a call.** 0.2.6
+  listed this as a known issue. It may go to a label with what its
+  routine's caller pushed still on the stack: `push bc / ld hl,HND / call
+  DSP` with `DSP: ex (sp),hl / ret` goes to HND with BC on top, and `HND:
+  call SHOWP / ret` became `jp SHOWP`. SHOWP, of another module, takes its
+  argument off the stack: jumped to, it took the return address of QQ's
+  caller for it, and returned to BC. So it was where QQ pushed HND and
+  called a routine that reads above its return address, after which the
+  height is not known, and where a routine wrote HND over its return
+  address through a pointer made from SP. A jump out of the text did not
+  count at all: `push bc / push hl / jp EXT` goes to HL when EXT returns.
+
+  Now the optimizer follows where each routine's return address is, as
+  well as how deep the stack is: at a position on the stack, or in a
+  register pair, through `pop`, `push`, `ex (sp),hl`, `ex de,hl` and
+  calls. A `ret` goes back to the call only where the address is at the
+  top of the stack and may not have been written over; so does a jump out
+  of the text, whose code returns to what is there. One that may not goes
+  where the optimizer cannot follow, and where the word under the one it
+  takes is not the return address, or the height is not known, the code
+  it goes to may be entered with something pushed: no tail call is then
+  made in code that may be entered from anywhere. On the corpus this costs
+  10 tail calls: 4 in each build of PIP, whose ERROR goes on to RETRY in
+  the main program, so the heights after its calls are not known; one in
+  DM, where the height after `push hl / call PDECIMAL` is counted as if
+  PDECIMAL, of another module, left its argument pushed (see Known issues);
+  and one in SN, whose routines write through pointers where it makes one
+  from SP.
+- **A `pop` of the return address was not seen as moving it where the
+  routine's entry height is not known.** 0.2.6 listed this as a known
+  issue. When the ways into a routine disagree about the height (a routine
+  that has pushed something goes on into a label that is also called),
+  `SUBR: pop hl / ld (V),hl / jp EXT` was not taken to move its return
+  address, and `call SUBR / ret` became `jp SUBR`. Jumped to, SUBR took
+  its caller's return address. Now a `pop`, or `ex (sp),hl`, where the
+  height is not known may take anything, and its routine may come back
+  with the stack as it pleases: no tail call is made to it, and the height
+  after a call of it is not known. On the corpus this costs 4 bytes in ED,
+  whose main program sets SP (`ld sp,??STACK`), after which heights are
+  not known: 2 tail calls, an `xor a` and a relative jump.
+- **Code that only address arithmetic reaches was taken to be reached by
+  nothing,** as 0.2.5 and 0.2.6 did, so a tail call there was not checked
+  against what a jump the optimizer cannot follow may have pushed: `push
+  hl / ld hl,LL+3 / jp (hl)` with `LL: jp 0 / call SHOWP / ret` became `jp
+  SHOWP`, and so did `jp LL+3`, `push hl / ret` to it, `jr $+3` over a
+  `ret`, and the second entry of a `jp` table (`ld hl,TBL+3 / jp (hl)`).
+  And a rewrite could change the size of the code between a label and an
+  address computed from it: with `ld hl,LB+2 / jp (hl)` and `LB: ld a,0 /
+  jp MM`, `ld a,0` became `xor a`, and `jp MM` went as a jump to the next
+  line, so LB+2 was past MM's first instruction. Now an expression that
+  computes an address from a label of code - `LL+3`, `START-3`, `$+3`,
+  `(PATCH+1)`, in an operand, a `dw` or an `equ`, or through a name an
+  `equ` sets to a label - is worked out, by the optimizer's own sizes, to a
+  line and an offset. No rewrite changes or removes the instructions
+  between the label and the address, nor the one at the address unless it
+  is only jumped to, and the line at the address may be entered from
+  anywhere. Where the address cannot be worked out, every instruction of
+  the label's run of code of known size is so. Nothing changes on the
+  corpus: its only such expression is PL/M-80's `dw (START-3)`, which
+  covers `ld sp,??STACK`.
+- **A vector of `jp` instructions that another module enters at an offset
+  became a vector of `jr`,** as in 0.2.5 and 0.2.6: `BIOS:: jp BOOT / jp
+  WBOOT`, called at BIOS+3, became `jr BOOT / jr WBOOT`, two bytes each.
+  And jump threading removed `WBE: jp WBOOT` after `BIOS:: jp BOOT`, as a
+  jump whose label nothing names. Another module can compute an address
+  only from a label the text exports, and what it does with one the
+  optimizer cannot know; a label that `jp` instructions follow is the
+  vector. The `jp` instructions after a label the text exports (`NAME::`,
+  `public`, `global`, `entry`) are now left as they are, and each may be
+  entered from anywhere. Nothing changes on the corpus, where no exported
+  label is followed by a `jp`.
+- **`dw L`, where L is `jp M`, became `dw M`,** as in 0.2.5 and 0.2.6. A
+  word that holds the address of code was taken to be an address that is
+  only jumped to; a program that compares it, or keeps it, sees another
+  value. With `TBL: dw C0` and `C0: jp DONE`, `ld hl,(TBL) / ld de,C0 / or
+  a / sbc hl,de` found them different. Now the word is threaded only in a
+  table that is only jumped through: `dw` lines after a `jp (hl)`, whose
+  label nothing exports and one line names, `ld de,TBL`, followed by `add
+  hl,de / ld e,(hl) / inc hl / ld d,(hl) / ex de,hl / jp (hl)`, as uplm80
+  writes for `DO CASE`. Jumped to, L goes on to M with L in HL, which the
+  dispatch leaves there; so the word is threaded only where the code at M
+  does not read HL. On the corpus this keeps one word of each build of
+  PIP's tables as it was, 4 bytes in all: the arm goes to code that calls
+  ??BDOS, of another module, which is taken to read HL.
+
+### Changed
+
+- **A routine that takes the arguments pushed for it off the stack returns
+  to its call.** Under PL/M-80's calling convention, which uplm80 0.4.0
+  follows, a procedure of three or more parameters takes the pushed ones
+  off at its entry: `pop hl / ex (sp),hl`. 0.2.5 and 0.2.6 took such a
+  routine to move its return address, and so to return anywhere, and the
+  height after a call of it not to be known: liveness stopped at its
+  `ret`, and at the `ret` of every routine that called it. Now a routine
+  is regular where every `ret` takes its return address at one height, and
+  it takes nothing off the stack above that height; that height is what a
+  call of it does to the stack (a word lower for one argument), and its
+  `ret` goes back to the call. What each routine does is found as a fixed
+  point over the routines it calls. A tail call is made where the return
+  address is at the top of the stack as a `ret` would take it, which in a
+  routine that has taken its arguments off is a word or more higher than
+  it was entered. No tail call is made to a routine that reaches its own
+  return address, or leaves the stack other than it found it. On the
+  corpus this gains 165 bytes in 21 outputs: 54 `cp 0` → `or a`, 49 `ld
+  a,0` → `xor a`, 57 tail calls, 5 relative jumps and 3 threaded jumps,
+  102 of the bytes in 80un. 80un and 80unbas, built with this release and
+  run on every sample archive, write the same files as with 0.2.6.
+
+### Added
+
+- `tests/z80sim.py` lays code out as um80 does: each instruction as long as
+  the Z80 encodes it, from sizes of its own, so that an address computed
+  from a label of code (`BIOS+3`, `$+3`) is the byte an assembler puts
+  there, and a jump or return to an address goes to the instruction there.
+  `tests/test_z80_model.py`: its sizes are um80's. `tests/_equiv.py`'s
+  `assert_equivalent` can leave bytes out of the comparison (`ignore`),
+  such as a table of addresses of code, which the optimizer may change.
+- `tests/test_control_flow.py`: the tail call to SHOWP after each `ret`
+  above that may not go back (four ways), to SUBR, after each of the five
+  ways to code that address arithmetic reaches, the vector entered at
+  BIOS+3 and BIOS+6 (three ways), LB+2, and the compared word. Each runs
+  the code before and after optimization, and fails on 0.2.6. So does the
+  dispatch table, threaded, but not where its target reads HL; a tail call
+  where the return address is on top a word higher; and, in
+  `tests/test_liveness.py`, `ld a,0` before a call of a routine that takes
+  its argument off the stack. 18 of the 368 tests fail on 0.2.6.
+- `tests/peepfuzz.py`: a quarter of the programs also call a routine that
+  takes an argument its caller pushed off the stack, from a random stream
+  of their own, so that the rest of each program is as it was. 0.2.6 and
+  this release differ on none of the first 3,000.
+
+### Known issues
+
+- **The stack is taken to be reached only relative to SP:** by `pop`,
+  `ret`, `ex (sp)`, and pointers made from SP. An address that the text
+  gives, a label or a number, is taken not to be a slot on the stack. The
+  optimizer changes how deep the stack is where a routine runs (a tail
+  call runs it one return address higher), and what is below SP (it
+  removes a `push` with its `pop`). So `push hl / ld hl,(x) / ex de,hl /
+  pop hl` → `ld de,(x)`, and `push hl / ld (x),hl / pop hl` and `push af /
+  ld (x),a / pop af` → the instruction in the middle, assume that x is not
+  the slot the push fills. Code outside the text is taken to change no
+  return address but its own, and not to reach below the SP it is called
+  with. It is taken to come back with SP where it was before the call, not
+  to take off the stack what its caller pushed - which a procedure of
+  another module written to PL/M-80's convention does. That makes the
+  height counted after its call too high, never too low, and so costs
+  code, not correctness: a tail call in DM, above. Called where its caller
+  has pushed nothing, it is taken not to read above its return address,
+  where its caller's return address is: `call EXT / ret` becomes `jp EXT`,
+  and so does `call 5 / ret`. A number, or a name an `equ` sets to one, is
+  taken to be an address outside the text, even where the text places
+  itself with `org`. Nor is it taken to hand back a pointer into the
+  stack, as a routine of another module that returns SP in HL would: only
+  this text's pointers made from SP count. Nor, where it is handed such a
+  pointer, to read through it what is above its own return address, which
+  a tail call in this text changes: `W: ld hl,0 / add hl,sp / dec hl / dec
+  hl / call RB / ret` with `RB: call EXT / ld a,1 / ret` still becomes `jp
+  RB`, and EXT reads its own return address through HL, not RB's. Taking
+  every routine that calls out of the text, where the text makes such a
+  pointer, to read above its return address would cost one byte on the
+  corpus, in DM.PLM.
+- **A jump out of the text where the stack height is not known is taken to
+  find its return address at the top of the stack.** After `ld hl,(6) / ld
+  sp,hl / call MAIN`, `jp 0` is taken to go where `ret` would, not to code
+  of this text entered with something pushed. The height is not known
+  after `ld sp` or a call of a routine that is not regular. Taking every
+  such jump to go anywhere with something pushed, as a `ret` there is,
+  would cost 59 bytes on the corpus, in six outputs: 80un's two programs
+  of several modules, each of which ends `call MAIN / jp 0` after `ld
+  sp,hl`, and MSPL (in both builds), SET and SUB, whose main programs set
+  SP (`ld sp,??STACK`) and go to ??BOOT.
+- **A program is taken not to depend on the size of its code,** which
+  every rewrite changes, beyond what it computes from a label as above.
+  Dead-store elimination relies on this: an address is not computed across
+  an instruction. An address computed at run time from another is not
+  seen: a routine that returns past the bytes after its call (`pop hl /
+  inc hl / push hl / ret`) depends on the size of the instruction there,
+  which a rewrite may change. Nor is one that another module computes from
+  a label the text exports, other than one that `jp` instructions follow.
+  From a label of data, an address is taken to stay in the data it labels
+  or point where that ends.
+
 ## 0.2.6 - 2026-09-25
 
 The corpus below is what uplm80 0.3.7 (its release branch at 0a25af2)
