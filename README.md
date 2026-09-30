@@ -72,18 +72,18 @@ print(optimized)
 Without the `or b`, `ld a,0` stays: `xor a` also sets the flags, and the
 caller this code returns to might read them.
 
-For the `PeepholeOptimizer` class and its statistics, see [docs/INTEGRATION.md](docs/INTEGRATION.md).
+For the `PeepholeOptimizer` class and its statistics, see [docs/INTEGRATION.md](https://github.com/avwohl/upeepz80/blob/main/docs/INTEGRATION.md).
 
 ## Documentation
 
-- [docs/INTEGRATION.md](docs/INTEGRATION.md): integration guide, the `PeepholeOptimizer` class, statistics, input format, migrating from upeep80
-- [docs/design.md](docs/design.md): optimization phases, correctness, architecture, performance, comparison with upeep80, history
-- [docs/development.md](docs/development.md): running the tests, type checking, code formatting, contributing
-- [CHANGELOG.md](CHANGELOG.md): release history
+- [docs/INTEGRATION.md](https://github.com/avwohl/upeepz80/blob/main/docs/INTEGRATION.md): integration guide, the `PeepholeOptimizer` class, statistics, input format, migrating from upeep80
+- [docs/design.md](https://github.com/avwohl/upeepz80/blob/main/docs/design.md): optimization phases, correctness, architecture, performance, comparison with upeep80, history
+- [docs/development.md](https://github.com/avwohl/upeepz80/blob/main/docs/development.md): running the tests, type checking, code formatting, contributing
+- [CHANGELOG.md](https://github.com/avwohl/upeepz80/blob/main/CHANGELOG.md): release history
 
 ## License
 
-This project is licensed under the GNU General Public License v2.0 - see [LICENSE](LICENSE) for details.
+This project is licensed under the GNU General Public License v2.0 - see [LICENSE](https://github.com/avwohl/upeepz80/blob/main/LICENSE) for details.
 
 ## Related Projects
 
