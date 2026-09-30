@@ -215,4 +215,5 @@ If you're migrating from upeep80:
 ## See Also
 
 - [README.md](../README.md) - Overview and features
+- [design.md](design.md) - Optimization phases, correctness, comparison with upeep80
 - [upeep80](https://github.com/avwohl/upeep80) - For 8080 input support
