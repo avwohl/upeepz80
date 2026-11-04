@@ -21,6 +21,7 @@ For compilers that generate 8080 mnemonics, use upeep80 instead.
 
 from __future__ import annotations
 
+import difflib
 import re
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
@@ -2163,8 +2164,23 @@ class PeepholeOptimizer:
         ]
 
     def optimize(self, asm_text: str) -> str:
-        """Optimize Z80 assembly text."""
+        """Optimize Z80 assembly text.
+
+        A ``;#`` debug marker line (um80_and_friends docs/debug_info.md) is
+        kept, and the markers stay in their order: a marker is a comment
+        line, so the patterns skip it and the instructions are the same
+        with and without markers.  A marker whose code the optimizer
+        deleted (dead code, a call merged into a jump) is put in front of
+        the next marker that is left, so it is in front of the next code.
+        """
         lines = asm_text.split("\n")
+        before = lines if _MARKER_LINE.search(asm_text) else None
+        lines = self._optimize_lines(lines)
+        if before is not None:
+            lines = _keep_markers(before, lines)
+        return "\n".join(lines)
+
+    def _optimize_lines(self, lines: list[str]) -> list[str]:
         changed = True
         passes = 0
         max_passes = 10
@@ -2202,7 +2218,7 @@ class PeepholeOptimizer:
         # code.
         lines = self._convert_to_relative_jumps(lines)
 
-        return "\n".join(lines)
+        return lines
 
     # ---- matching -----------------------------------------------------------
 
@@ -2928,8 +2944,13 @@ class PeepholeOptimizer:
             # Look for procedure entry (label followed by ld (addr),a)
             if self._is_label_line(line) and not stripped.startswith("??") and \
                     _split(line)[1] is None:
-                if i + 1 < len(lines) and not self._is_label_line(lines[i + 1]):
-                    parsed = self._parse_line(lines[i + 1])
+                # ";#" debug marker lines between the label and the store do
+                # not hide the store (a plain comment still does, as before)
+                j = i + 1
+                while j < len(lines) and _MARKER_LINE.match(lines[j]):
+                    j += 1
+                if j < len(lines) and not self._is_label_line(lines[j]):
+                    parsed = self._parse_line(lines[j])
                     # Check for ld (addr),a pattern
                     if (parsed and parsed[0] == "ld" and
                             parsed[1].startswith("(") and parsed[1].lower().endswith("),a") and
@@ -2938,9 +2959,9 @@ class PeepholeOptimizer:
                         if storage is None:
                             storage = _Storage(lines)
                             frozen = _Code(lines).frozen
-                        if storage.unread(i + 1, addr) and i + 1 not in frozen:
-                            result.append(line)  # Keep the label
-                            i += 2  # Skip the store instruction
+                        if storage.unread(j, addr) and j not in frozen:
+                            result.extend(lines[i:j])  # Keep the label and the markers
+                            i = j + 1  # Skip the store instruction
                             changed = True
                             self.stats["dead_store_elim"] = self.stats.get("dead_store_elim", 0) + 1
                             continue
@@ -3000,6 +3021,47 @@ class PeepholeOptimizer:
                     return False
 
         return True
+
+
+# the kinds of um80_and_friends docs/debug_info.md: another word after the
+# ``#`` (``; #pragma``) is a plain comment
+_MARKER_LINE = re.compile(
+    r"^[ \t]*;[ \t]*#(?:file|line|inline|endinline|func|endfunc|noopt)"
+    r"(?![A-Za-z0-9_])", re.MULTILINE | re.IGNORECASE)
+
+
+def _keep_markers(before: list[str], after: list[str]) -> list[str]:
+    """``after`` is ``before`` as the optimizer changed it.  Put each
+    ``;#`` marker line that is missing from ``after`` back, in front of the
+    next marker of ``before`` that ``after`` has (at the end when no
+    marker follows), in its order."""
+    old = [ln for ln in before if _MARKER_LINE.match(ln)]
+    kept = [(k, ln) for k, ln in enumerate(after) if _MARKER_LINE.match(ln)]
+    new = [ln for _, ln in kept]
+    if old == new:
+        return after
+    sm = difflib.SequenceMatcher(None, old, new, autojunk=False)
+    # index in ``after`` of each marker of ``old`` that is still there
+    where: dict[int, int] = {}
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag == "equal":
+            for d in range(i2 - i1):
+                where[i1 + d] = kept[j1 + d][0]
+    inserts: dict[int, list[str]] = {}
+    pending: list[str] = []
+    for i, ln in enumerate(old):
+        if i in where:
+            if pending:
+                inserts.setdefault(where[i], []).extend(pending)
+                pending = []
+        else:
+            pending.append(ln)
+    out: list[str] = []
+    for k, ln in enumerate(after):
+        out.extend(inserts.get(k, ()))
+        out.append(ln)
+    out.extend(pending)
+    return out
 
 
 def optimize(asm_text: str) -> str:

@@ -3,6 +3,60 @@
 Notable changes to upeepz80. Releases up to 0.2.4 are described on the
 [GitHub releases page](https://github.com/avwohl/upeepz80/releases).
 
+## Unreleased
+
+Phase 4 of the debugger plan (cpmemu `docs/debugger_plan.md`): `;#` debug
+markers (um80_and_friends `docs/debug_info.md`) go through `optimize()`.
+Measured on the 413 tests (407 before, plus 6 new): `tests/conftest.py` now
+runs each `optimize()` call of every test a second time, on the same text
+with a `;#line` marker in front of each instruction line and one at the end,
+and fails the test when the markers come out in another order, when one is
+missing, or when the instructions differ from the run with no markers. The
+fuzz tests (300 programs) take part. Before the two changes below, 24 of the
+tests failed this check. On 116 uc80 programs compiled with `--no-optimize`
+the output of `optimize()` is the same as in 0.2.7 (0 of 116 texts differ),
+and the 407 old tests give the same results.
+
+### Fixed
+
+- **A `;#` marker line between a procedure label and its dead store hid the
+  store.** `P:` / `;#line 1 3` / `ld (X),a` kept the store that `P:` /
+  `ld (X),a` removes: `_dead_store_elimination` looked at the line after the
+  label only. It now steps over marker lines. An ordinary comment line there
+  still hides the store, as in 0.2.7, so the output for a text with no
+  marker is not changed (the first version of this change skipped every
+  comment line; that would have changed the output of uplm80 and uada80
+  for a text with a comment there, which was not measured).
+- **A marker of deleted code was deleted with the code.** Dead code, a
+  `call X` / `ret` merged into `jp X` and a threaded jump took the `;#`
+  lines that stood between their instructions. `optimize()` now puts each
+  lost marker in front of the next marker that is left (at the end when
+  none follows), so the markers keep their order and the lost marker stands
+  in front of the next code. A text with no marker takes no extra time
+  (one regular-expression search).
+
+### Added
+
+- `tests/test_markers.py`: six tests that name the cases (a plain comment still hides the store, a pair that fuses
+  across markers, a marker in front of a dead store, a marker of dead code,
+  a marked text, a marker with blanks).
+- Only the kinds of `debug_info.md` (`file`, `line`, `inline`, `endinline`,
+  `func`, `endfunc`, `noopt`) are markers. `; #pragma ...` is a plain
+  comment.
+
+### Not done
+
+- `;#noopt begin` / `;#noopt end` regions and `PeepholeOptimizer(disable=...)`
+  are phase 5. The optimizer does not yet treat a `;#noopt` region as one
+  that no pattern may change.
+- No release, and no new pin in uc80, uplm80 or uada80. The dead store fix
+  matters for a compiler that stores a register parameter at procedure entry
+  (uplm80, uada80): with 0.2.7 a marker in front of that store stops the
+  removal, and a build with markers has other code. uc80 does not write
+  such a store: its D2 test (115 programs, `.mac` text without markers) gives
+  the same result with 0.2.7 and with this version. uplm80 and uada80 were
+  not measured.
+
 ## 0.2.7 - 2026-09-26
 
 The corpus below is what uplm80 0.4.0 (d8fd4ed) makes of the MP/M II and
