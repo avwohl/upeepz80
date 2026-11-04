@@ -17,6 +17,33 @@ tests failed this check. On 116 uc80 programs compiled with `--no-optimize`
 the output of `optimize()` is the same as in 0.2.7 (0 of 116 texts differ),
 and the 407 old tests give the same results.
 
+Phase 5 of the debugger plan (optnone, D6): `;#noopt begin` / `;#noopt end`
+regions and `PeepholeOptimizer(disable={...})`. Measured: 429 tests pass (413
+before, plus 16 in the new `tests/test_noopt.py`). On the 116 uc80 programs
+(`examples/`, `tests/c-testsuite-z80/`, `tests/gen3/`, compiled with
+`--no-optimize`) the output of `optimize()` is the same as at the commit before
+this change (0 of 116 texts differ), so a text with no `;#noopt` gives the
+same bytes as before. The docs are in `docs/noopt.md`.
+
+### Added in phase 5
+
+- **`;#noopt` regions.** No pattern, no Z80 rewrite, no jump threading, no
+  `jp` to `jr` change, no `djnz` change and no dead store removal changes a
+  line between `;#noopt begin` and its `;#noopt end` (regions nest; a `begin`
+  with no `end` runs to the end of the text; an `end` with no `begin` has no
+  effect). The lines are `frozen` in `_Code`, as the lines of an address
+  computed from a label are. The liveness walk (`_Code._walk`) answers "live"
+  when it reaches a line of a region, so a rewrite before a region keeps
+  every value the region could read, also across a `call` into a region.
+  The call graph and the stack heights still read the real instructions of
+  the region.
+- **`disable`.** `PeepholeOptimizer(disable={"tail_call"})` and
+  `optimize(text, disable=...)` stop a pattern by its `name`, or a rewrite by
+  its key in `stats` (`jr_convert`, `djnz`, `jump_thread`, `jump_to_next`,
+  `dw_thread`, `dead_label_removed`, `dead_store_elim`, the Z80 rewrite
+  names). With `disable` empty nothing changes.
+- `tests/conftest.py` passes `disable` on to its second run (with markers).
+
 ### Fixed
 
 - **A `;#` marker line between a procedure label and its dead store hid the
@@ -46,9 +73,11 @@ and the 407 old tests give the same results.
 
 ### Not done
 
-- `;#noopt begin` / `;#noopt end` regions and `PeepholeOptimizer(disable=...)`
-  are phase 5. The optimizer does not yet treat a `;#noopt` region as one
-  that no pattern may change.
+- Phase 5 does not stop `call X` / `ret` in a text with no region and no
+  `disable`: `tail_call` is on, as before. The caller has to ask.
+- A `;#noopt` region is not a barrier for a pass that works on the text
+  from outside (uc80's `peep_local`, `peep_flow` and `looprot`): uc80
+  puts the text of the region back after each of those passes.
 - No release, and no new pin in uc80, uplm80 or uada80. The dead store fix
   matters for a compiler that stores a register parameter at procedure entry
   (uplm80, uada80): with 0.2.7 a marker in front of that store stops the

@@ -58,7 +58,7 @@ def marker_check(monkeypatch):
         if not isinstance(asm_text, str) or _HAS_MARKER.search(asm_text):
             return result
         marked = add_markers(asm_text)
-        other = peephole.PeepholeOptimizer()
+        other = peephole.PeepholeOptimizer(disable=self.disable)
         got = original(other, marked)
         seen.append((asm_text, result, marked, got))
         return result

@@ -776,6 +776,8 @@ class _Code:
         self.exported: set[str] = set()
         self.public: set[str] = set()
         self.radix = _radix(lines)
+        # The lines between ``;#noopt begin`` and ``;#noopt end``.
+        self.noopt = _noopt_lines(lines)
         # What earlier questions to live() found, for the lines where they
         # were outside every routine they had followed a call into: the sets
         # of resources found dead from there, and those found live.
@@ -949,7 +951,8 @@ class _Code:
         if self._offsets is not None:
             return self._offsets
         entries: set[int] = set()
-        frozen: set[int] = set()
+        # A ``;#noopt`` region is frozen: no rewrite may change or remove it.
+        frozen: set[int] = set(self.noopt)
         patched: set[int] = set()
         self._offsets = (entries, frozen, patched)
         n = len(self.lines)
@@ -1167,6 +1170,7 @@ class _Code:
         routines = self.routines
         height = routines.height
         patched = self.patched
+        noopt = self.noopt
         n = len(self.effects)
         while work:
             i, need, frames = work.pop()
@@ -1178,6 +1182,9 @@ class _Code:
                 if eff is None:
                     i += 1
                     continue
+                if i in noopt:
+                    # A ``;#noopt`` region reads everything.
+                    return True
                 budget[0] -= 1
                 if budget[0] < 0:
                     return None
@@ -1669,8 +1676,13 @@ class PeepholeOptimizer:
     as input and produces lowercase Z80 assembly output.
     """
 
-    def __init__(self) -> None:
-        self.patterns = self._init_patterns()
+    def __init__(self, disable: "frozenset[str] | set[str] | list[str] | tuple[str, ...] | None" = None
+                 ) -> None:
+        # ``disable`` names the rewrites to turn off: the ``name`` of a
+        # PeepholePattern (``tail_call``) or of a Z80 rewrite or pass (the
+        # keys of ``stats``: ``jr_convert``, ``jump_thread``, ...).
+        self.disable = frozenset(disable or ())
+        self.patterns = [p for p in self._init_patterns() if p.name not in self.disable]
         self.stats: dict[str, int] = {}
 
     def _init_patterns(self) -> list[PeepholePattern]:
@@ -2322,7 +2334,8 @@ class PeepholeOptimizer:
                     # Check if this is a label line
                     if self._is_label_line(lines[j]):
                         label = next_line.split(":")[0].strip()
-                        if label == target and i not in code.frozen:
+                        if label == target and i not in code.frozen and \
+                                "jump_to_next" not in self.disable:
                             # JP to next label - remove the JP
                             self.stats["jump_to_next"] = self.stats.get("jump_to_next", 0) + 1
                             changed = True
@@ -2443,6 +2456,8 @@ class PeepholeOptimizer:
             rewrite = self._z80_rewrite(lines, code, i)
             if rewrite is not None and not code.frozen.isdisjoint(range(i, rewrite[1])):
                 rewrite = None  # an address computed from a label depends on it
+            if rewrite is not None and rewrite[2] in self.disable:
+                rewrite = None
             if rewrite is not None:
                 new_lines, i, stat = rewrite
                 result.extend(new_lines)
@@ -2648,6 +2663,7 @@ class PeepholeOptimizer:
                     idxs, ins, skipped, j = w
                     parts = split_operands(ins[1][1])
                     if ins[1][0] in ("jp", "jr") and len(parts) == 2 and \
+                            "djnz" not in self.disable and \
                             parts[0].lower() == "nz" and code.frozen.isdisjoint(idxs):
                         t = code.target(parts[1])
                         if t is not None and code.reaches(idxs[0], idxs[1], t) and \
@@ -2664,7 +2680,7 @@ class PeepholeOptimizer:
                 cond = parts[0].lower() if len(parts) == 2 else None
                 target = parts[-1] if parts else ""
                 if (cond is None or cond in JR_CONDITIONS) and len(parts) in (1, 2) and \
-                        i not in code.frozen:
+                        i not in code.frozen and "jr_convert" not in self.disable:
                     t = code.target(target)
                     if t is not None and code.reaches(i, i, t):
                         result.append(f"\tjr {cond},{target}" if cond else f"\tjr {target}")
@@ -2744,7 +2760,8 @@ class PeepholeOptimizer:
         for i, line in enumerate(lines):
             parsed = None if self._is_label_line(line) else self._parse_line(line)
             if parsed and parsed[0] in ("jp", "jr") and "," not in parsed[1] and \
-                    parsed[1].strip() in label_target and i not in code.frozen:
+                    parsed[1].strip() in label_target and i not in code.frozen and \
+                    "jump_thread" not in self.disable:
                 new_target = label_target[parsed[1].strip()]
                 if parsed[0] == "jp":
                     result.append(f"\tjp {new_target}")
@@ -2760,6 +2777,7 @@ class PeepholeOptimizer:
                 changed = True
                 self.stats["jump_thread"] = self.stats.get("jump_thread", 0) + 1
             elif parsed and parsed[0] == "dw" and parsed[1].strip() in label_target and \
+                    "dw_thread" not in self.disable and \
                     self._only_jumped_through(code, lines, i, label_target[parsed[1].strip()],
                                               named_at):
                 # A word of a table of addresses that are only jumped to.
@@ -2792,6 +2810,7 @@ class PeepholeOptimizer:
             if self._is_label_line(line):
                 label, op, _ = _split(line)
                 if label is not None and label in label_target and refs.get(label.lower(), 0) == 0 and \
+                        "dead_label_removed" not in self.disable and \
                         not self._falls_through(final_result) and \
                         not self._frozen_jump(code, result, i):
                     changed = True
@@ -2931,6 +2950,8 @@ class PeepholeOptimizer:
           at module scope perfectly legally; nor is looking for its name,
           since ``pp = .a + 1`` reaches the parameter after ``a``.
         """
+        if "dead_store_elim" in self.disable:
+            return lines, False
         result: list[str] = []
         changed = False
         storage: _Storage | None = None
@@ -3025,6 +3046,30 @@ class PeepholeOptimizer:
 
 # the kinds of um80_and_friends docs/debug_info.md: another word after the
 # ``#`` (``; #pragma``) is a plain comment
+_NOOPT_LINE = re.compile(r"^[ \t]*;[ \t]*#noopt[ \t]+(begin|end)(?![A-Za-z0-9_])", re.IGNORECASE)
+
+
+def _noopt_lines(lines: list[str]) -> set[int]:
+    """The indexes of the lines between ``;#noopt begin`` and its
+    ``;#noopt end`` (regions nest; a ``begin`` with no ``end`` runs to the
+    end of the text; an ``end`` with no ``begin`` is ignored).  The two
+    marker lines are not in the set: they are comments."""
+    found: set[int] = set()
+    depth = 0
+    for i, line in enumerate(lines):
+        if ";" in line:
+            m = _NOOPT_LINE.match(line)
+            if m:
+                if m.group(1).lower() == "begin":
+                    depth += 1
+                elif depth:
+                    depth -= 1
+                continue
+        if depth:
+            found.add(i)
+    return found
+
+
 _MARKER_LINE = re.compile(
     r"^[ \t]*;[ \t]*#(?:file|line|inline|endinline|func|endfunc|noopt)"
     r"(?![A-Za-z0-9_])", re.MULTILINE | re.IGNORECASE)
@@ -3064,12 +3109,13 @@ def _keep_markers(before: list[str], after: list[str]) -> list[str]:
     return out
 
 
-def optimize(asm_text: str) -> str:
+def optimize(asm_text: str, disable=None) -> str:
     """Optimize Z80 assembly code.
 
     This is the main entry point for the optimizer.
     Pass Z80 assembly text (using ld, jp, jr, etc. mnemonics)
-    and receive optimized Z80 assembly back.
+    and receive optimized Z80 assembly back.  ``disable`` names rewrites
+    to turn off (see :class:`PeepholeOptimizer`).
     """
-    optimizer = PeepholeOptimizer()
+    optimizer = PeepholeOptimizer(disable=disable)
     return optimizer.optimize(asm_text)

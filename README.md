@@ -79,6 +79,7 @@ For the `PeepholeOptimizer` class and its statistics, see [docs/INTEGRATION.md](
 - [docs/INTEGRATION.md](https://github.com/avwohl/upeepz80/blob/main/docs/INTEGRATION.md): integration guide, the `PeepholeOptimizer` class, statistics, input format, migrating from upeep80
 - [docs/design.md](https://github.com/avwohl/upeepz80/blob/main/docs/design.md): optimization phases, correctness, architecture, performance, comparison with upeep80, history
 - [docs/development.md](https://github.com/avwohl/upeepz80/blob/main/docs/development.md): running the tests, type checking, code formatting, contributing
+- [docs/noopt.md](https://github.com/avwohl/upeepz80/blob/main/docs/noopt.md): `;#noopt begin` and `;#noopt end` regions, and `disable=` to stop named rewrites
 - [CHANGELOG.md](https://github.com/avwohl/upeepz80/blob/main/CHANGELOG.md): release history
 
 ## License
