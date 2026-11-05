@@ -3,7 +3,7 @@
 Notable changes to upeepz80. Releases up to 0.2.4 are described on the
 [GitHub releases page](https://github.com/avwohl/upeepz80/releases).
 
-## Unreleased
+## 0.2.8 - 2026-11-04
 
 Phase 4 of the debugger plan (cpmemu `docs/debugger_plan.md`): `;#` debug
 markers (um80_and_friends `docs/debug_info.md`) go through `optimize()`.
