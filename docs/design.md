@@ -1,6 +1,6 @@
 # upeepz80 Design
 
-How the optimizer works, what keeps each rewrite correct, and how upeepz80 relates to upeep80.
+How the optimizer works, what keeps each rewrite correct, and why upeepz80 replaces upeep80.
 
 ## Optimization Phases
 
@@ -104,7 +104,9 @@ Benchmarks on typical compiler workloads:
 - Peephole optimization: ~50,000 instructions/second
 - Memory usage: Minimal (pattern-based, no large data structures)
 
-## Comparison with upeep80
+## upeep80 is retired
+
+upeepz80 replaces upeep80. Do not use upeep80. The table shows the differences between the two optimizers.
 
 | Feature | upeep80 | upeepz80 |
 |---------|---------|----------|
@@ -113,14 +115,13 @@ Benchmarks on typical compiler workloads:
 | Translation | 8080 → Z80 translation | None needed |
 | Use case | Compilers generating 8080 code | Compilers generating Z80 code |
 
-Choose **upeepz80** if your compiler already generates Z80 mnemonics.
-Choose **upeep80** if your compiler generates 8080 mnemonics.
+upeepz80 does not translate 8080 mnemonics. If your compiler writes 8080 mnemonics, change the compiler to write Z80 mnemonics.
 
 ## Used By
 
-- **[uplm80](https://github.com/avwohl/uplm80)** - PL/M-80 compiler for Z80 (after migration)
-- **[uada80](https://github.com/avwohl/uada80)** - Ada compiler for Z80 (after migration)
+- **[uplm80](https://github.com/avwohl/uplm80)** - PL/M-80 compiler for Z80 (changed from upeep80 in December 2025)
+- **[uada80](https://github.com/avwohl/uada80)** - Ada compiler for Z80 (changed from upeep80 in December 2025)
 
 ## History
 
-upeepz80 is a sibling project to upeep80, designed for compilers that generate native Z80 assembly. It shares the same optimization algorithms but removes the 8080 translation layer for cleaner, more efficient code when 8080 support isn't needed.
+upeepz80 is a sibling project to upeep80, designed for compilers that generate native Z80 assembly. It shares the same optimization algorithms but removes the 8080 translation layer for cleaner, more efficient code when 8080 support isn't needed. upeep80 is now retired, and upeepz80 replaces it.

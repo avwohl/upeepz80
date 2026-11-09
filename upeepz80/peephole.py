@@ -16,7 +16,7 @@ the code the optimizer can see (a call, a return, ``jp (hl)``, a jump to a
 label defined elsewhere, data, the end of the text) counts as reading
 everything, since the caller, the callee or the other module may.
 
-For compilers that generate 8080 mnemonics, use upeep80 instead.
+It does not accept 8080 mnemonics. upeep80, which accepted them, is retired.
 """
 
 from __future__ import annotations

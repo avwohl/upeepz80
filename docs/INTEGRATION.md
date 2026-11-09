@@ -14,7 +14,7 @@ Your compiler must generate **pure Z80 mnemonics in lowercase**:
 - add, sub, and, or, xor (not ANA, ORA, XRA, etc.)
 - push, pop with Z80 register names (af not PSW, bc/de/hl not B/D/H)
 
-If your compiler generates 8080 mnemonics, use [upeep80](https://github.com/avwohl/upeep80) instead.
+If your compiler writes 8080 mnemonics, change the compiler to write Z80 mnemonics. upeepz80 does not translate 8080 mnemonics, and upeep80 is retired.
 
 ## Basic Usage
 
@@ -175,7 +175,7 @@ The optimizer preserves the structure of your code:
 
 ## Migrating from upeep80
 
-If you're migrating from upeep80:
+upeep80 is retired. To change from upeep80 to upeepz80, do these steps:
 
 1. **Change your import**:
    ```python
@@ -186,9 +186,7 @@ If you're migrating from upeep80:
    from upeepz80 import optimize
    ```
 
-2. **Ensure Z80 output**: Your code generator must produce Z80 mnemonics directly. If it still generates 8080 mnemonics, either:
-   - Update the code generator to emit Z80
-   - Continue using upeep80 with `InputSyntax.I8080`
+2. **Ensure Z80 output**: Your code generator must produce Z80 mnemonics directly. If it still writes 8080 mnemonics, change the code generator to write Z80 mnemonics. Do not continue to use upeep80 with `InputSyntax.I8080`.
 
 3. **Update function calls**:
    ```python
@@ -215,5 +213,4 @@ If you're migrating from upeep80:
 ## See Also
 
 - [README.md](../README.md) - Overview and features
-- [design.md](design.md) - Optimization phases, correctness, comparison with upeep80
-- [upeep80](https://github.com/avwohl/upeep80) - For 8080 input support
+- [design.md](design.md) - Optimization phases, correctness, why upeepz80 replaces upeep80

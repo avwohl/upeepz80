@@ -4,9 +4,9 @@ A language-agnostic peephole optimization library for Z80 compilers that generat
 
 ## Overview
 
-upeepz80 provides high-quality optimization passes for compilers targeting the Zilog Z80 processor. Unlike upeep80, this library expects **pure Z80 mnemonics in lowercase** as input (ld, jp, jr, etc.) and produces optimized Z80 assembly output with lowercase mnemonics.
+upeepz80 provides high-quality optimization passes for compilers targeting the Zilog Z80 processor. This library expects **pure Z80 mnemonics in lowercase** as input (ld, jp, jr, etc.) and produces optimized Z80 assembly output with lowercase mnemonics.
 
-If your compiler generates 8080 mnemonics (MOV, MVI, LXI, etc.) that need translation to Z80, use [upeep80](https://github.com/avwohl/upeep80) instead.
+upeepz80 does not accept 8080 mnemonics, for example MOV, MVI and LXI. If your compiler writes 8080 mnemonics, change the compiler to write Z80 mnemonics. upeep80, the optimizer that accepted 8080 input, is retired. Do not use upeep80.
 
 ## Features
 
@@ -77,7 +77,7 @@ For the `PeepholeOptimizer` class and its statistics, see [docs/INTEGRATION.md](
 ## Documentation
 
 - [docs/INTEGRATION.md](https://github.com/avwohl/upeepz80/blob/main/docs/INTEGRATION.md): integration guide, the `PeepholeOptimizer` class, statistics, input format, migrating from upeep80
-- [docs/design.md](https://github.com/avwohl/upeepz80/blob/main/docs/design.md): optimization phases, correctness, architecture, performance, comparison with upeep80, history
+- [docs/design.md](https://github.com/avwohl/upeepz80/blob/main/docs/design.md): optimization phases, correctness, architecture, performance, why upeepz80 replaces upeep80, history
 - [docs/development.md](https://github.com/avwohl/upeepz80/blob/main/docs/development.md): running the tests, type checking, code formatting, contributing
 - [docs/noopt.md](https://github.com/avwohl/upeepz80/blob/main/docs/noopt.md): `;#noopt begin` and `;#noopt end` regions, and `disable=` to stop named rewrites
 - [CHANGELOG.md](https://github.com/avwohl/upeepz80/blob/main/CHANGELOG.md): release history
@@ -109,5 +109,4 @@ This project is licensed under the GNU General Public License v2.0 - see [LICENS
 
 ## See Also
 
-- [upeep80](https://github.com/avwohl/upeep80) - Optimizer with 8080 input support
 - [Z80 CPU User Manual](http://www.z80.info/zip/z80cpu_um.pdf)
